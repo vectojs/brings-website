@@ -11,9 +11,10 @@ projection.
 
 ## Status
 
-The foundation provides the responsive application shell. It deliberately does
-not link a local Core checkout; `@vectojs/brings-core` is added as an exact
-registry dependency only after a useful Core release exists.
+The foundation provides the responsive application shell and owns a Core-backed
+revision-zero document session. It consumes the exact published
+`@vectojs/brings-core@0.2.1` registry dependency, never a local workspace link.
+The next interaction slices will render and mutate only this Core state.
 
 ## Development
 

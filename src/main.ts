@@ -1,4 +1,5 @@
 import { Scene } from '@vectojs/core';
+import { BringsEditorController } from './editor/BringsEditorController';
 import { EditorShell } from './view/EditorShell';
 
 type HeadlessDevtools = typeof import('@vectojs/devtools/headless');
@@ -9,6 +10,7 @@ declare global {
     __brings?: {
       scene: Scene;
       shell: EditorShell;
+      snapshot: () => import('@vectojs/brings-core').EditorSnapshot;
       audit: () => SceneAudit;
       trace: () => readonly import('@vectojs/devtools/headless').EventTraceEntry[];
     };
@@ -22,6 +24,7 @@ if (!canvas || !root) throw new Error('Brings requires its VectoJS root and canv
 
 const scene = new Scene(canvas, { disableWindowResize: true });
 scene.renderMode = 'onDemand';
+const editor = new BringsEditorController(() => crypto.randomUUID());
 const shell = new EditorShell(1, 1);
 scene.add(shell);
 
@@ -49,6 +52,7 @@ if (new URLSearchParams(window.location.search).has('debug')) {
       const debug = {
         scene,
         shell,
+        snapshot: () => editor.snapshot(),
         audit: () => auditScene(scene),
         trace: () => trace.entries,
       };
