@@ -44,3 +44,36 @@ test('does not project closed compact drawers over the design canvas', async ({ 
   });
   expect(findings).toEqual([]);
 });
+
+test('creates a Frame and nested Rectangle through canvas-native tools', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await page.getByRole('region', { name: 'Design canvas' }).click({ position: { x: 180, y: 164 } });
+  await page.getByRole('button', { name: /Rectangle/ }).click();
+  await page.getByRole('region', { name: 'Design canvas' }).click({ position: { x: 220, y: 204 } });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          snapshot: () => {
+            document: {
+              revision: number;
+              nodes: readonly { type: string; parentId: string | null }[];
+            };
+          };
+        };
+        return debug.snapshot().document;
+      }),
+    )
+    .toMatchObject({
+      revision: 2,
+      nodes: [
+        { type: 'frame', parentId: null },
+        { type: 'rectangle', parentId: expect.any(String) },
+      ],
+    });
+});
