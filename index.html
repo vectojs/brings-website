@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Brings is a local-first, canvas-native vector editor for independent creators."
+    />
+    <title>Brings — Local-first vector editor</title>
+    <style>
+      html,
+      body,
+      #brings-root,
+      #brings-canvas {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      #brings-canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="brings-root">
+      <canvas id="brings-canvas"></canvas>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

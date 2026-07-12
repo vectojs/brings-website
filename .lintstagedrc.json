@@ -1,0 +1,4 @@
+{
+  "*.{ts,json,md,yml,yaml,html}": ["prettier --write"],
+  "*.ts": ["oxlint --deny-warnings"]
+}

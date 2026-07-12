@@ -1,0 +1,23 @@
+name: Bug report
+description: Report a reproducible Brings editor problem.
+labels: [bug]
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include tool, pointer/keyboard steps, viewport, browser zoom, and observed result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+    validations:
+      required: true
