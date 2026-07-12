@@ -18,7 +18,7 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: just verify
+      - run: bun run verify
 
   browser-verify:
     runs-on: ubuntu-latest
@@ -29,7 +29,7 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run e2e:install
-      - run: just browser-verify-all
+      - run: bun run test:e2e
 
   deploy:
     needs: [verify, browser-verify]

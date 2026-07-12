@@ -26,6 +26,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "oxlint --deny-warnings src test e2e scripts",
+    "verify": "bun run format:check && bun run lint && bun run test && bun run build",
     "verify:bundle": "bun scripts/verify-entry-bundle.ts",
     "prepare": "husky",
     "lint-staged": "lint-staged",
