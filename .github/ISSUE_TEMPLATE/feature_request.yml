@@ -1,0 +1,17 @@
+name: Feature request
+description: Propose a local-first Brings editor capability.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed interaction and state behavior
+      description: Include keyboard, pointer, document, accessibility, and responsive implications.
+    validations:
+      required: true

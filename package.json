@@ -1,0 +1,53 @@
+{
+  "name": "brings-website",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canvas-native, local-first vector editor for independent creators, built with VectoJS.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vectojs/brings-website.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vectojs/brings-website/issues"
+  },
+  "homepage": "https://brings-website.vectojs.org/",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && bun run verify:bundle",
+    "preview": "vite preview",
+    "test": "bun test test/*.test.ts",
+    "test:e2e": "playwright test",
+    "e2e:install": "playwright install --with-deps chromium firefox webkit",
+    "deploy": "bun run deploy:preview",
+    "deploy:preview": "bash scripts/deploy-pages.sh dist brings-website",
+    "deploy:production": "bash scripts/deploy-pages.sh dist brings-website main",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "oxlint --deny-warnings src test e2e scripts",
+    "verify:bundle": "bun scripts/verify-entry-bundle.ts",
+    "prepare": "husky",
+    "lint-staged": "lint-staged",
+    "commitlint": "commitlint"
+  },
+  "dependencies": {
+    "@vectojs/core": "1.5.0",
+    "@vectojs/ui": "1.7.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@changesets/cli": "^2.31.0",
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
+    "@types/bun": "^1.3.0",
+    "@vectojs/devtools": "0.4.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.8",
+    "oxlint": "^1.73.0",
+    "prettier": "^3.9.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4",
+    "wrangler": "^4.110.0"
+  }
+}
