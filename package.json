@@ -33,6 +33,7 @@
     "commitlint": "commitlint"
   },
   "dependencies": {
+    "@vectojs/brings-core": "0.2.1",
     "@vectojs/core": "1.5.0",
     "@vectojs/ui": "1.7.1"
   },

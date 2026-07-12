@@ -19,6 +19,17 @@ test('loads the headless DevTools model only for debug sessions', async ({ page 
   await expect
     .poll(() => page.evaluate(() => typeof Reflect.get(window, '__brings')))
     .toBe('object');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          snapshot: () => { document: { revision: number; pages: readonly { name: string }[] } };
+        };
+        const snapshot = debug.snapshot();
+        return { revision: snapshot.document.revision, pageName: snapshot.document.pages[0]?.name };
+      }),
+    )
+    .toEqual({ revision: 0, pageName: 'Page 1' });
 });
 
 test('does not project closed compact drawers over the design canvas', async ({ page }) => {
