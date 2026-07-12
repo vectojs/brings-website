@@ -5,10 +5,7 @@ dev:
     @bun run dev
 
 verify:
-    @bun run format:check
-    @bun run lint
-    @bun run test
-    @bun run build
+    @bun run verify
 
 browser-verify project="chromium":
     @env CI=1 DEBUG=pw:webserver bun run test:e2e -- --project "{{project}}"
