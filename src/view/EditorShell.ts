@@ -1,9 +1,18 @@
-import { type A11yAttributes, type ContentProjection, Entity, type IRenderer } from '@vectojs/core';
+import {
+  type A11yAttributes,
+  type ContentProjection,
+  Entity,
+  type IRenderer,
+  type VectoJSEvent,
+} from '@vectojs/core';
+import type { EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
 import { type EditorLayout, resolveEditorLayout } from './layout';
 
 export type DrawerSide = 'left' | 'right';
 
 class EditorRegion extends Entity {
+  private pointerHandler: ((event: VectoJSEvent) => void) | null = null;
+  private pointerListenerAttached = false;
   public constructor(
     id: string,
     private readonly attributes: A11yAttributes,
@@ -19,15 +28,80 @@ class EditorRegion extends Entity {
     this.interactive = interactive;
   }
 
+  public setPointerHandler(handler: ((event: VectoJSEvent) => void) | null): void {
+    this.pointerHandler = handler;
+    if (handler !== null && !this.pointerListenerAttached) {
+      this.pointerListenerAttached = true;
+      this.on('pointerdown', (event) => this.pointerHandler?.(event));
+    }
+  }
+
   public override getA11yAttributes(): A11yAttributes {
     return this.attributes;
   }
 
-  public override isPointInside(): boolean {
-    return false;
+  public override isPointInside(globalX: number, globalY: number): boolean {
+    if (!this.interactive || this.pointerHandler === null) return false;
+    const local = this.worldToLocal(globalX, globalY);
+    return (
+      local !== null &&
+      local.x >= 0 &&
+      local.x <= this.width &&
+      local.y >= 0 &&
+      local.y <= this.height
+    );
   }
 
   public override render(_renderer: IRenderer): void {}
+}
+
+type CreationTool = 'frame' | 'rectangle';
+
+class ToolbarButton extends Entity {
+  private active = false;
+
+  public constructor(
+    id: string,
+    private readonly label: string,
+    private readonly onActivate: () => void,
+  ) {
+    super(id);
+    this.interactive = true;
+    this.on('pointerdown', (event) => {
+      event.preventDefault();
+      this.onActivate();
+    });
+  }
+
+  public setFrame(x: number, y: number, active: boolean): void {
+    this.x = x;
+    this.y = y;
+    this.width = 88;
+    this.height = 32;
+    this.active = active;
+  }
+
+  public override getA11yAttributes(): A11yAttributes {
+    return { role: 'button', label: this.active ? `${this.label} tool selected` : this.label };
+  }
+
+  public override isPointInside(globalX: number, globalY: number): boolean {
+    const local = this.worldToLocal(globalX, globalY);
+    return (
+      local !== null &&
+      local.x >= 0 &&
+      local.x <= this.width &&
+      local.y >= 0 &&
+      local.y <= this.height
+    );
+  }
+
+  public override render(renderer: IRenderer): void {
+    renderer.beginPath();
+    renderer.roundRect(0, 0, this.width, this.height, 6);
+    renderer.fill(this.active ? '#2563eb' : '#3a404b');
+    renderer.fillText(this.label, 12, 21, '600 12px system-ui, sans-serif', '#f8fafc');
+  }
 }
 
 class MobileModeNotice extends Entity {
@@ -150,10 +224,45 @@ export class EditorShell extends Entity {
     '500 12px system-ui, sans-serif',
     '#475569',
   );
+  private readonly frameTool = new ToolbarButton('brings-frame-tool', 'Frame', () => {
+    this.activeTool = 'frame';
+    this.scene?.markDirty();
+  });
+  private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
+    this.activeTool = 'rectangle';
+    this.scene?.markDirty();
+  });
   private activeDrawer: DrawerSide | null = null;
+  private activeTool: CreationTool = 'frame';
   private layout: EditorLayout;
 
-  public constructor(width: number, height: number) {
+  public constructor(
+    width: number,
+    height: number,
+    private readonly documentSnapshot: () => EditorSnapshot = () => ({
+      document: {
+        id: '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['id'],
+        revision: 0,
+        name: 'Untitled',
+        pageOrder: [],
+        activePageId:
+          '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['activePageId'],
+        pages: [],
+        nodes: [],
+      },
+      selection: { nodeIds: [], activeNodeId: null },
+      undoDepth: 0,
+      redoDepth: 0,
+    }),
+    private readonly createAt: (
+      tool: CreationTool,
+      x: number,
+      y: number,
+    ) => Result<EditorSnapshot> = () => ({
+      ok: false,
+      error: { code: 'shape.unavailable', path: '/' },
+    }),
+  ) {
     super('brings-editor-shell');
     this.interactive = true;
     this.add(this.toolbar);
@@ -161,6 +270,8 @@ export class EditorShell extends Entity {
     this.add(this.canvasRegion);
     this.add(this.properties);
     this.toolbar.add(this.title);
+    this.toolbar.add(this.frameTool);
+    this.toolbar.add(this.rectangleTool);
     this.layers.add(this.pagesLabel);
     this.layers.add(this.layersLabel);
     this.canvasRegion.add(this.workspaceLabel);
@@ -168,6 +279,12 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
     this.layout = resolveEditorLayout(width, height);
+    this.canvasRegion.setPointerHandler((event) => {
+      if (!this.authoringEnabled) return;
+      const x = event.localX ?? 0;
+      const y = event.localY ?? 0;
+      if (this.createAt(this.activeTool, x, y).ok) this.scene?.markDirty();
+    });
     this.resize(width, height);
   }
 
@@ -231,6 +348,7 @@ export class EditorShell extends Entity {
     renderer.beginPath();
     renderer.roundRect(viewport.x, viewport.y, viewport.width, viewport.height, 0);
     renderer.fill('#f4f6fa');
+    this.renderDocument(renderer, viewport.x, viewport.y);
 
     this.renderPanel(renderer, this.layers);
     this.renderPanel(renderer, this.properties);
@@ -262,6 +380,8 @@ export class EditorShell extends Entity {
       !this.authoringEnabled,
     );
     this.title.setFrame(20, 35, true);
+    this.frameTool.setFrame(120, 12, this.activeTool === 'frame');
+    this.rectangleTool.setFrame(216, 12, this.activeTool === 'rectangle');
     this.pagesLabel.setFrame(20, 30, this.layers.interactive);
     this.layersLabel.setFrame(20, 72, this.layers.interactive);
     this.propertiesLabel.setFrame(20, 30, this.properties.interactive);
@@ -277,5 +397,49 @@ export class EditorShell extends Entity {
     renderer.beginPath();
     renderer.roundRect(panel.x, panel.y, panel.width, panel.height, 0);
     renderer.fill('#2b3038');
+  }
+
+  private renderDocument(renderer: IRenderer, originX: number, originY: number): void {
+    const document = this.documentSnapshot().document;
+    const nodes = new Map(document.nodes.map((node) => [node.id, node]));
+    const renderNode = (node: SceneNode, parentX: number, parentY: number): void => {
+      if (!node.visible) return;
+      const x = parentX + node.transform[4];
+      const y = parentY + node.transform[5];
+      if (node.type === 'frame' || node.type === 'rectangle') {
+        renderer.save();
+        renderer.setGlobalAlpha(node.opacity);
+        renderer.beginPath();
+        renderer.roundRect(x, y, node.width, node.height, [...node.cornerRadii]);
+        const fill = node.type === 'frame' ? node.background : node.fill;
+        if (fill !== null) renderer.fill(this.paint(fill));
+        if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+        renderer.restore();
+      }
+      if (node.type === 'frame' || node.type === 'group') {
+        for (const childId of node.childIds) {
+          const child = nodes.get(childId);
+          if (child !== undefined) renderNode(child, x, y);
+        }
+      }
+    };
+    const activePage = document.pages.find((page) => page.id === document.activePageId);
+    if (activePage === undefined) return;
+    renderer.save();
+    renderer.translate(originX, originY);
+    for (const rootId of activePage.rootNodeIds) {
+      const root = nodes.get(rootId);
+      if (root !== undefined) renderNode(root, 0, 0);
+    }
+    renderer.restore();
+  }
+
+  private paint(paint: {
+    readonly r: number;
+    readonly g: number;
+    readonly b: number;
+    readonly a: number;
+  }): string {
+    return `rgba(${Math.round(paint.r * 255)}, ${Math.round(paint.g * 255)}, ${Math.round(paint.b * 255)}, ${paint.a})`;
   }
 }
