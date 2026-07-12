@@ -30,6 +30,7 @@ const shell = new EditorShell(
   1,
   () => editor.snapshot(),
   (tool, x, y) => (tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y)),
+  (x, y) => editor.selectAt(x, y),
 );
 scene.add(shell);
 

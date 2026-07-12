@@ -99,3 +99,10 @@ test('projects static chrome labels without making them pointer targets', () => 
     text: 'Local-first design workspace',
   });
 });
+
+test('starts with the Select tool active so canvas clicks select instead of creating', () => {
+  const shell = new EditorShell(1440, 900);
+  const selectTool = childById(shell, 'brings-select-tool');
+
+  expect(selectTool.getA11yAttributes()).toEqual({ role: 'button', label: 'Select tool selected' });
+});
