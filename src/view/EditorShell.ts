@@ -32,7 +32,9 @@ class EditorRegion extends Entity {
     this.pointerHandler = handler;
     if (handler !== null && !this.pointerListenerAttached) {
       this.pointerListenerAttached = true;
-      this.on('pointerdown', (event) => this.pointerHandler?.(event));
+      for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'] as const) {
+        this.on(type, (event) => this.pointerHandler?.(event));
+      }
     }
   }
 
@@ -57,6 +59,8 @@ class EditorRegion extends Entity {
 
 type CreationTool = 'frame' | 'rectangle';
 type CanvasTool = 'select' | CreationTool;
+type DragPreview = Readonly<{ deltaX: number; deltaY: number }>;
+type DragSession = Readonly<{ startX: number; startY: number }>;
 
 class ToolbarButton extends Entity {
   private active = false;
@@ -239,6 +243,8 @@ export class EditorShell extends Entity {
   });
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
+  private dragSession: DragSession | null = null;
+  private dragPreview: DragPreview | null = null;
   private layout: EditorLayout;
 
   public constructor(
@@ -271,6 +277,13 @@ export class EditorShell extends Entity {
       ok: false,
       error: { code: 'selection.unavailable', path: '/' },
     }),
+    private readonly moveSelectionBy: (
+      deltaX: number,
+      deltaY: number,
+    ) => Result<EditorSnapshot> = () => ({
+      ok: false,
+      error: { code: 'transform.unavailable', path: '/' },
+    }),
   ) {
     super('brings-editor-shell');
     this.interactive = true;
@@ -289,14 +302,7 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
     this.layout = resolveEditorLayout(width, height);
-    this.canvasRegion.setPointerHandler((event) => {
-      if (!this.authoringEnabled) return;
-      const x = event.localX ?? 0;
-      const y = event.localY ?? 0;
-      const result =
-        this.activeTool === 'select' ? this.selectAt(x, y) : this.createAt(this.activeTool, x, y);
-      if (result.ok) this.scene?.markDirty();
-    });
+    this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
     this.resize(width, height);
   }
 
@@ -419,8 +425,9 @@ export class EditorShell extends Entity {
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
     const renderNode = (node: SceneNode, parentX: number, parentY: number): void => {
       if (!node.visible) return;
-      const x = parentX + node.transform[4];
-      const y = parentY + node.transform[5];
+      const preview = selected.has(node.id) ? this.dragPreview : null;
+      const x = parentX + node.transform[4] + (preview?.deltaX ?? 0);
+      const y = parentY + node.transform[5] + (preview?.deltaY ?? 0);
       if (node.type === 'frame' || node.type === 'rectangle') {
         renderer.save();
         renderer.setGlobalAlpha(node.opacity);
@@ -452,6 +459,56 @@ export class EditorShell extends Entity {
       if (root !== undefined) renderNode(root, 0, 0);
     }
     renderer.restore();
+  }
+
+  private routeCanvasPointer(event: VectoJSEvent): void {
+    if (!this.authoringEnabled) return;
+    const x = event.localX ?? 0;
+    const y = event.localY ?? 0;
+
+    if (event.type === 'pointercancel') {
+      this.clearDragPreview();
+      return;
+    }
+    if (event.type === 'pointermove') {
+      if (this.dragSession === null) return;
+      this.dragPreview = {
+        deltaX: x - this.dragSession.startX,
+        deltaY: y - this.dragSession.startY,
+      };
+      this.scene?.markDirty();
+      return;
+    }
+    if (event.type === 'pointerup') {
+      if (this.dragSession === null) return;
+      const deltaX = x - this.dragSession.startX;
+      const deltaY = y - this.dragSession.startY;
+      this.clearDragPreview();
+      if (deltaX !== 0 || deltaY !== 0) this.moveSelectionBy(deltaX, deltaY);
+      this.scene?.markDirty();
+      return;
+    }
+    if (event.type !== 'pointerdown') return;
+
+    if (this.activeTool !== 'select') {
+      const result = this.createAt(this.activeTool, x, y);
+      if (result.ok) this.scene?.markDirty();
+      return;
+    }
+
+    const result = this.selectAt(x, y);
+    if (!result.ok) return;
+    this.dragSession =
+      result.value.selection.nodeIds.length === 0 ? null : { startX: x, startY: y };
+    this.dragPreview = null;
+    this.scene?.markDirty();
+  }
+
+  private clearDragPreview(): void {
+    if (this.dragSession === null && this.dragPreview === null) return;
+    this.dragSession = null;
+    this.dragPreview = null;
+    this.scene?.markDirty();
   }
 
   private paint(paint: {
