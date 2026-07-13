@@ -12,9 +12,10 @@ projection.
 ## Status
 
 The foundation provides the responsive application shell and owns a Core-backed
-revision-zero document session. It consumes the exact published
-`@vectojs/brings-core@0.2.1` registry dependency, never a local workspace link.
-The next interaction slices will render and mutate only this Core state.
+document session with Frame/Rectangle creation and frontmost canvas selection.
+It consumes the exact published `@vectojs/brings-core@0.5.0` registry dependency,
+never a local workspace link. Interaction slices render and mutate only this
+Core state.
 
 ## Development
 
@@ -30,7 +31,10 @@ The canonical application URL is `https://brings-website.vectojs.org/`.
 
 `just deploy` creates a Pages preview for the current checked-out branch. Only
 the protected `main` branch may use `just deploy-production`; CI performs that
-production deployment after all verification jobs succeed.
+production deployment after all verification jobs succeed. The deployment
+workflow associates the canonical Pages domain, creates its missing CNAME only
+when no conflicting record exists, retries validation, and waits for the domain
+to become active before reporting success.
 
 ## License
 
