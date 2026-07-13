@@ -13,6 +13,9 @@ declare global {
       snapshot: () => import('@vectojs/brings-core').EditorSnapshot;
       audit: () => SceneAudit;
       trace: () => readonly import('@vectojs/devtools/headless').EventTraceEntry[];
+      undo: () => import('@vectojs/brings-core').Result<
+        import('@vectojs/brings-core').EditorSnapshot
+      >;
     };
   }
 }
@@ -31,6 +34,7 @@ const shell = new EditorShell(
   () => editor.snapshot(),
   (tool, x, y) => (tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y)),
   (x, y) => editor.selectAt(x, y),
+  (deltaX, deltaY) => editor.moveSelectionBy(deltaX, deltaY),
 );
 scene.add(shell);
 
@@ -61,6 +65,11 @@ if (new URLSearchParams(window.location.search).has('debug')) {
         snapshot: () => editor.snapshot(),
         audit: () => auditScene(scene),
         trace: () => trace.entries,
+        undo: () => {
+          const result = editor.undo();
+          if (result.ok) scene.markDirty();
+          return result;
+        },
       };
       window.__brings = debug;
       destroyDebug = (): void => {

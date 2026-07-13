@@ -110,6 +110,22 @@ export class BringsEditorController {
     );
   }
 
+  /** Commit one page-space translation for the current Core-owned selection. */
+  public moveSelectionBy(deltaX: number, deltaY: number): Result<EditorSnapshot> {
+    const selection = this.store.snapshot().selection.nodeIds;
+    if (selection.length === 0) return this.failure('selection.empty', '/nodeIds');
+    return this.store.execute({
+      kind: 'apply-transform-delta',
+      nodeIds: selection,
+      delta: [1, 0, 0, 1, deltaX, deltaY],
+    });
+  }
+
+  /** Undo the most recent durable Core command. */
+  public undo(): Result<EditorSnapshot> {
+    return this.store.undo();
+  }
+
   private failure(code: string, path: string): Result<never> {
     const error: BringsError = { code, path };
     return { ok: false, error };
