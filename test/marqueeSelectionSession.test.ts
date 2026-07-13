@@ -950,6 +950,95 @@ test('snapshots every caller sample field once and freezes detached marquee prev
   expect(preview.visual.selection.nodeIds).toEqual([third]);
 });
 
+test('preserves class provider receivers with one method lookup per invocation', () => {
+  class StatefulProvider implements SelectionProposalProvider {
+    public pointCalls = 0;
+    public areaCalls = 0;
+
+    public constructor(private readonly ownerId: NodeId | null) {}
+
+    public point(
+      start: SelectionInteractionStart,
+      _point: EditorPagePoint,
+      mode: PointSelectionMode,
+    ): Result<Readonly<{ proposal: SelectionProposal; ownerId: NodeId | null }>> {
+      this.pointCalls += 1;
+      const original = [...start.selection.nodeIds];
+      const nodeIds =
+        this.ownerId === null
+          ? mode === 'replace'
+            ? []
+            : original
+          : mode === 'add-for-drag'
+            ? [...original, ...(!original.includes(this.ownerId) ? [this.ownerId] : [])]
+            : [this.ownerId];
+      return {
+        ok: true,
+        value: { ownerId: this.ownerId, proposal: selectionProposal(start, nodeIds) },
+      };
+    }
+
+    public area(
+      start: SelectionInteractionStart,
+      _rect: Readonly<{ x: number; y: number; width: number; height: number }>,
+      mode: AreaSelectionMode,
+    ): Result<SelectionProposal> {
+      this.areaCalls += 1;
+      return {
+        ok: true,
+        value: selectionProposal(
+          start,
+          mode === 'add' ? [...start.selection.nodeIds, third] : [third],
+        ),
+      };
+    }
+  }
+
+  function observedProvider(provider: StatefulProvider): Readonly<{
+    provider: SelectionProposalProvider;
+    lookups: Readonly<{ point: () => number; area: () => number }>;
+  }> {
+    let pointLookups = 0;
+    let areaLookups = 0;
+    return {
+      provider: new Proxy(provider, {
+        get(target, property, receiver) {
+          if (property === 'point') pointLookups += 1;
+          if (property === 'area') areaLookups += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+      lookups: {
+        point: () => pointLookups,
+        area: () => areaLookups,
+      },
+    };
+  }
+
+  const start = interactionStart();
+  const marqueeState = new StatefulProvider(null);
+  const marquee = observedProvider(marqueeState);
+  const marqueeSession = beginSession(start, pointerSample(39, 0, 0), marquee.provider);
+  expect(marqueeSession.update(pointerSample(39, 4, 0), marquee.provider)).toMatchObject({
+    kind: 'preview',
+    visual: { selection: { nodeIds: [third] } },
+  });
+  expect({ calls: [marqueeState.pointCalls, marqueeState.areaCalls] }).toEqual({ calls: [1, 1] });
+  expect({ lookups: [marquee.lookups.point(), marquee.lookups.area()] }).toEqual({
+    lookups: [1, 1],
+  });
+
+  const moveState = new StatefulProvider(third);
+  const move = observedProvider(moveState);
+  const moveSession = beginSession(start, pointerSample(40, 0, 0, true), move.provider);
+  expect(moveSession.update(pointerSample(40, 4, 0), move.provider)).toMatchObject({
+    kind: 'preview',
+    visual: { selection: { nodeIds: [first, second, third] } },
+  });
+  expect({ calls: [moveState.pointCalls, moveState.areaCalls] }).toEqual({ calls: [2, 0] });
+  expect({ lookups: [move.lookups.point(), move.lookups.area()] }).toEqual({ lookups: [2, 0] });
+});
+
 test('exposes only approved effect variants from the pure session contract', () => {
   const effects: SelectionGestureEffect[] = [
     { kind: 'ignore' },

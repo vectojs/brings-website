@@ -278,7 +278,8 @@ export class MarqueeSelectionSession {
     try {
       const callPoint = provider.point;
       point = snapshotPointResult(
-        callPoint(
+        callPoint.call(
+          provider,
           capturedStart,
           capturedSample.pagePoint,
           capturedSample.shiftKey ? 'toggle' : 'replace',
@@ -496,7 +497,7 @@ export class MarqueeSelectionSession {
     const current = () => this.isCurrent(version);
     try {
       const callPoint = guardedRead(() => provider.point, current);
-      const rawResult = callPoint(this.interactionStart, point, mode);
+      const rawResult = callPoint.call(provider, this.interactionStart, point, mode);
       if (!current()) return { kind: 'interrupted' };
       return { kind: 'result', result: snapshotPointResult(rawResult, current) };
     } catch (error) {
@@ -514,7 +515,7 @@ export class MarqueeSelectionSession {
     const current = () => this.isCurrent(version);
     try {
       const callArea = guardedRead(() => provider.area, current);
-      const rawResult = callArea(this.interactionStart, rect, mode);
+      const rawResult = callArea.call(provider, this.interactionStart, rect, mode);
       if (!current()) return { kind: 'interrupted' };
       return { kind: 'result', result: snapshotAreaResult(rawResult, current) };
     } catch (error) {
