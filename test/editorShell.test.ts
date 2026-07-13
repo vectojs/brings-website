@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { VectoJSEvent } from '@vectojs/core';
 import { EditorShell } from '../src/view/EditorShell';
 
 function childById(shell: EditorShell, id: string) {
@@ -105,4 +106,81 @@ test('starts with the Select tool active so canvas clicks select instead of crea
   const selectTool = childById(shell, 'brings-select-tool');
 
   expect(selectTool.getA11yAttributes()).toEqual({ role: 'button', label: 'Select tool selected' });
+});
+
+test('routes unmodified deletion from the focused VMT design region', () => {
+  let deleteCalls = 0;
+  let prevented = false;
+  const shell = new EditorShell(
+    1440,
+    900,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      deleteCalls += 1;
+      return { ok: false, error: { code: 'test.delete', path: '/' } };
+    },
+  );
+  const canvasRegion = childById(shell, 'brings-canvas-region');
+  const event = new VectoJSEvent('keydown', canvasRegion, {
+    key: 'Delete',
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+
+  canvasRegion.dispatchEvent(event);
+
+  expect(deleteCalls).toBe(1);
+  expect(prevented).toBe(true);
+  expect(event.propagationStopped).toBe(true);
+});
+
+test('yields deletion to native editors and ignores key events outside the design region', () => {
+  let deleteCalls = 0;
+  const shell = new EditorShell(
+    1440,
+    900,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      deleteCalls += 1;
+      return { ok: false, error: { code: 'test.delete', path: '/' } };
+    },
+  );
+  const canvasRegion = childById(shell, 'brings-canvas-region');
+  const toolbar = childById(shell, 'brings-toolbar');
+
+  canvasRegion.dispatchEvent(
+    new VectoJSEvent('keydown', canvasRegion, {
+      key: 'Backspace',
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      target: { tagName: 'INPUT' },
+      preventDefault: () => undefined,
+    }),
+  );
+  toolbar.dispatchEvent(
+    new VectoJSEvent('keydown', toolbar, {
+      key: 'Delete',
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      target: { tagName: 'CANVAS' },
+      preventDefault: () => undefined,
+    }),
+  );
+
+  expect(deleteCalls).toBe(0);
 });

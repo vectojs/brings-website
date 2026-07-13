@@ -1,23 +1,24 @@
-export type HistoryAction = 'undo' | 'redo';
+export type EditorShortcutAction = 'undo' | 'redo' | 'delete';
 
-export interface HistoryShortcutEvent {
+export interface EditorShortcutEvent {
   readonly key?: string;
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
   readonly shiftKey: boolean;
 }
 
-/** Resolve platform history chords without coupling them to browser listeners. */
-export function resolveHistoryShortcut(event: HistoryShortcutEvent): HistoryAction | null {
+/** Resolve platform editor chords without coupling them to browser listeners. */
+export function resolveEditorShortcut(event: EditorShortcutEvent): EditorShortcutAction | null {
   const key = event.key?.toLowerCase();
   const primaryModifier = event.ctrlKey || event.metaKey;
   if (primaryModifier && key === 'z') return event.shiftKey ? 'redo' : 'undo';
   if (event.ctrlKey && key === 'y') return 'redo';
+  if (!primaryModifier && (key === 'delete' || key === 'backspace')) return 'delete';
   return null;
 }
 
-/** Keep native editor history owned by its input, textarea, or editable host. */
-export function isNativeHistoryTarget(target: EventTarget | null): boolean {
+/** Keep native editor shortcuts owned by their input, textarea, or editable host. */
+export function isNativeEditorTarget(target: EventTarget | null): boolean {
   if (target === null || typeof target !== 'object') return false;
   const candidate = target as { readonly tagName?: unknown; readonly isContentEditable?: unknown };
   const tagName = typeof candidate.tagName === 'string' ? candidate.tagName.toUpperCase() : '';

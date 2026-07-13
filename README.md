@@ -16,8 +16,10 @@ document session with Frame/Rectangle creation and frontmost canvas selection.
 Select-tool drags render a transient VectoJS preview, commit exactly one Core
 transform command on `pointerup`, and roll back without history on
 `pointercancel`. The focusable VMT design region routes Ctrl/Cmd+Z,
-Ctrl/Cmd+Shift+Z, and Ctrl+Y to transactional Core undo/redo while yielding to
-native editors. The app consumes exact published `@vectojs/brings-core@0.6.0`,
+Ctrl/Cmd+Shift+Z, and Ctrl+Y to transactional Core undo/redo. Delete and
+Backspace atomically delete the normalized selection as one Core command, with
+selection restoration on undo and native-editor yielding for every shortcut.
+The app consumes exact published `@vectojs/brings-core@0.7.0`,
 `@vectojs/core@1.6.2`, `@vectojs/ui@1.7.2`, and
 `@vectojs/devtools@0.4.2` registry dependencies, never local workspace links.
 Interaction slices render and mutate only Core-owned state.

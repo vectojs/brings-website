@@ -8,10 +8,10 @@ import {
 import type { EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
 import { type EditorLayout, resolveEditorLayout } from './layout';
 import {
-  type HistoryAction,
-  isNativeHistoryTarget,
-  resolveHistoryShortcut,
-} from './historyShortcuts';
+  type EditorShortcutAction,
+  isNativeEditorTarget,
+  resolveEditorShortcut,
+} from './editorShortcuts';
 
 export type DrawerSide = 'left' | 'right';
 
@@ -290,9 +290,15 @@ export class EditorShell extends Entity {
       ok: false,
       error: { code: 'transform.unavailable', path: '/' },
     }),
-    private readonly runHistory: (action: HistoryAction) => Result<EditorSnapshot> = () => ({
+    private readonly runHistory: (
+      action: Exclude<EditorShortcutAction, 'delete'>,
+    ) => Result<EditorSnapshot> = () => ({
       ok: false,
       error: { code: 'history.unavailable', path: '/' },
+    }),
+    private readonly deleteSelection: () => Result<EditorSnapshot> = () => ({
+      ok: false,
+      error: { code: 'selection.delete-unavailable', path: '/' },
     }),
   ) {
     super('brings-editor-shell');
@@ -311,7 +317,7 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeLabel);
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
-    this.on('keydown', (event) => this.routeHistoryShortcut(event));
+    this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
     this.layout = resolveEditorLayout(width, height);
     this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
     this.resize(width, height);
@@ -522,19 +528,19 @@ export class EditorShell extends Entity {
     this.scene?.markDirty();
   }
 
-  private routeHistoryShortcut(event: VectoJSEvent): void {
-    const action = resolveHistoryShortcut(event);
-    if (action === null || this.shouldYieldNativeHistory(event)) return;
+  private routeEditorShortcut(event: VectoJSEvent): void {
+    const action = resolveEditorShortcut(event);
+    if (action === null || this.shouldYieldNativeEditor(event)) return;
 
     event.preventDefault();
     event.stopPropagation();
-    const result = this.runHistory(action);
+    const result = action === 'delete' ? this.deleteSelection() : this.runHistory(action);
     if (result.ok) this.scene?.markDirty();
   }
 
-  private shouldYieldNativeHistory(event: VectoJSEvent): boolean {
+  private shouldYieldNativeEditor(event: VectoJSEvent): boolean {
     const nativeEvent = event.nativeEvent as { readonly target?: EventTarget | null } | null;
-    return isNativeHistoryTarget(nativeEvent?.target ?? null);
+    return isNativeEditorTarget(nativeEvent?.target ?? null);
   }
 
   private paint(paint: {
