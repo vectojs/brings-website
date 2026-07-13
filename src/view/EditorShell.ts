@@ -7,6 +7,11 @@ import {
 } from '@vectojs/core';
 import type { EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
 import { type EditorLayout, resolveEditorLayout } from './layout';
+import {
+  type HistoryAction,
+  isNativeHistoryTarget,
+  resolveHistoryShortcut,
+} from './historyShortcuts';
 
 export type DrawerSide = 'left' | 'right';
 
@@ -187,6 +192,7 @@ export class EditorShell extends Entity {
   private readonly canvasRegion = new EditorRegion('brings-canvas-region', {
     role: 'region',
     label: 'Design canvas',
+    tabIndex: 0,
   });
   private readonly properties = new EditorRegion('brings-properties', {
     role: 'group',
@@ -284,6 +290,10 @@ export class EditorShell extends Entity {
       ok: false,
       error: { code: 'transform.unavailable', path: '/' },
     }),
+    private readonly runHistory: (action: HistoryAction) => Result<EditorSnapshot> = () => ({
+      ok: false,
+      error: { code: 'history.unavailable', path: '/' },
+    }),
   ) {
     super('brings-editor-shell');
     this.interactive = true;
@@ -301,6 +311,7 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeLabel);
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
+    this.on('keydown', (event) => this.routeHistoryShortcut(event));
     this.layout = resolveEditorLayout(width, height);
     this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
     this.resize(width, height);
@@ -509,6 +520,21 @@ export class EditorShell extends Entity {
     this.dragSession = null;
     this.dragPreview = null;
     this.scene?.markDirty();
+  }
+
+  private routeHistoryShortcut(event: VectoJSEvent): void {
+    const action = resolveHistoryShortcut(event);
+    if (action === null || this.shouldYieldNativeHistory(event)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const result = this.runHistory(action);
+    if (result.ok) this.scene?.markDirty();
+  }
+
+  private shouldYieldNativeHistory(event: VectoJSEvent): boolean {
+    const nativeEvent = event.nativeEvent as { readonly target?: EventTarget | null } | null;
+    return isNativeHistoryTarget(nativeEvent?.target ?? null);
   }
 
   private paint(paint: {
