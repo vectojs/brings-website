@@ -623,7 +623,12 @@ export class EditorShell extends Entity {
     }
     if (event.type === 'pointermove') {
       const effect = session.update(sampled.value, this.selectionProvider);
-      if (this.selectionSession === session) this.selectionInterpreter.apply(effect);
+      if (this.selectionSession !== session) return;
+      if (effect.kind === 'discard') {
+        this.closeSelectionSession(session);
+        this.quarantinedPointerIds.add(pointerId);
+      }
+      this.selectionInterpreter.apply(effect);
       event.preventDefault();
       return;
     }

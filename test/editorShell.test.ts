@@ -502,6 +502,194 @@ test('does not let a stale finish close a newer session routed by its area provi
   expect(state.commits).toHaveLength(1);
 });
 
+test('closes and quarantines an update discard without consuming a later inactive Escape', () => {
+  const state = selectionPorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  let areaCalls = 0;
+  let dirtyCalls = 0;
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    proposeAreaSelection(start, rect, mode) {
+      areaCalls += 1;
+      return areaCalls === 1
+        ? state.ports.proposeAreaSelection(start, rect, mode)
+        : { ok: false, error: { code: 'test.area-terminal', path: '/area' } };
+    },
+    reportInteractionError: (error) => errors.push(error),
+  });
+  (shell as unknown as { _scene: Readonly<{ markDirty: () => void }> })._scene = {
+    markDirty: () => {
+      dirtyCalls += 1;
+    },
+  };
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 41, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 41, x: 30, y: 50 });
+  const preview = recordingRenderer();
+  shell.render(preview.renderer);
+  expect(
+    preview.calls.some(
+      (call) =>
+        call.method === 'roundRect' &&
+        JSON.stringify(call.args.slice(0, 5)) === JSON.stringify([10, 20, 20, 30, 0]),
+    ),
+  ).toBe(true);
+
+  dispatchPointer(shell, 'pointermove', { pointerId: 41, x: 40, y: 60 });
+  const cleared = recordingRenderer();
+  shell.render(cleared.renderer);
+  expect(
+    cleared.calls.some(
+      (call) =>
+        call.method === 'roundRect' &&
+        JSON.stringify(call.args.slice(0, 5)) === JSON.stringify([10, 20, 30, 40, 0]),
+    ),
+  ).toBe(false);
+  expect(errors).toEqual([{ code: 'test.area-terminal', path: '/area' }]);
+  expect(dirtyCalls).toBe(2);
+
+  let prevented = 0;
+  const canvas = childById(shell, 'brings-canvas-region');
+  const escape = new VectoJSEvent('keydown', canvas, {
+    key: 'Escape',
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => {
+      prevented += 1;
+    },
+  });
+  canvas.dispatchEvent(escape);
+  dispatchPointer(shell, 'pointermove', { pointerId: 41, x: 80, y: 90 });
+
+  expect(prevented).toBe(0);
+  expect(escape.propagationStopped).toBe(false);
+  expect(errors).toHaveLength(1);
+  expect(dirtyCalls).toBe(2);
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 42, x: 4, y: 6 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 42, x: 4, y: 6 });
+  expect(state.commits).toHaveLength(1);
+  expect(dirtyCalls).toBe(3);
+  dispatchPointer(shell, 'pointerup', { pointerId: 41, x: 80, y: 90 });
+  expect(errors).toHaveLength(1);
+  expect(state.commits).toHaveLength(1);
+  expect(dirtyCalls).toBe(3);
+});
+
+test('rejects missing pre-session coordinates once and releases the id on its raw terminal', () => {
+  const state = selectionPorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  const canvas = childById(shell, 'brings-canvas-region');
+  canvas.dispatchEvent(
+    new VectoJSEvent('pointerdown', canvas, {
+      pointerId: 51,
+      button: 0,
+    }),
+  );
+  canvas.dispatchEvent(new VectoJSEvent('pointermove', canvas, { pointerId: 51, button: 0 }));
+  canvas.dispatchEvent(new VectoJSEvent('pointerup', canvas, { pointerId: 51, button: 0 }));
+
+  expect(errors).toEqual([{ code: 'interaction.coordinate-invalid', path: '/viewport/x' }]);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 51, x: 5, y: 7 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 51, x: 5, y: 7 });
+  expect(state.commits).toHaveLength(1);
+});
+
+test('terminates a mid-session non-finite coordinate once and leaves other pointers routable', () => {
+  const state = selectionPorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 53, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 53, x: 30, y: 40 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 53, x: Number.NaN, y: 50 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 53, x: 60, y: 70 });
+
+  expect(errors).toEqual([{ code: 'interaction.coordinate-invalid', path: '/viewport/x' }]);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 54, x: 4, y: 6 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 54, x: 4, y: 6 });
+  expect(state.commits).toHaveLength(1);
+  dispatchPointer(shell, 'pointerup', { pointerId: 53, x: 60, y: 70 });
+  expect(errors).toHaveLength(1);
+  expect(state.commits).toHaveLength(1);
+});
+
+test('discards an owner pointercancel preview and immediately permits id reuse', () => {
+  const state = selectionPorts();
+  const shell = new EditorShell(1440, 900, state.ports);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 55, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 55, x: 30, y: 40 });
+  dispatchPointer(shell, 'pointercancel', { pointerId: 55, x: 30, y: 40 });
+  const recording = recordingRenderer();
+  shell.render(recording.renderer);
+
+  expect(
+    recording.calls.some(
+      (call) =>
+        call.method === 'roundRect' &&
+        JSON.stringify(call.args.slice(0, 5)) === JSON.stringify([10, 20, 20, 20, 0]),
+    ),
+  ).toBe(false);
+  expect(state.commits).toEqual([]);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 55, x: 5, y: 7 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 55, x: 5, y: 7 });
+  expect(state.commits).toHaveLength(1);
+});
+
+test('prohibits narrow-screen pointerdown from beginning a selection session', () => {
+  const state = selectionPorts();
+  let begins = 0;
+  const shell = new EditorShell(390, 600, {
+    ...state.ports,
+    beginSelectionInteraction: () => {
+      begins += 1;
+      return state.start;
+    },
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 57, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 57, x: 10, y: 20 });
+
+  expect(begins).toBe(0);
+  expect(state.pointCalls).toEqual([]);
+  expect(state.commits).toEqual([]);
+});
+
+test('yields inactive Escape without preventing, stopping, or calling an editor port', () => {
+  let portCalls = 0;
+  let prevented = 0;
+  const shell = new EditorShell(1440, 900, {
+    runHistory: () => {
+      portCalls += 1;
+      return { ok: false, error: { code: 'test.history', path: '/' } };
+    },
+    deleteSelection: () => {
+      portCalls += 1;
+      return { ok: false, error: { code: 'test.delete', path: '/' } };
+    },
+    reportInteractionError: () => {
+      portCalls += 1;
+    },
+  });
+  const canvas = childById(shell, 'brings-canvas-region');
+  const event = new VectoJSEvent('keydown', canvas, {
+    key: 'Escape',
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => {
+      prevented += 1;
+    },
+  });
+  canvas.dispatchEvent(event);
+
+  expect(portCalls).toBe(0);
+  expect(prevented).toBe(0);
+  expect(event.propagationStopped).toBe(false);
+});
+
 test('lets an active wide-screen gesture finish after resizing narrow', () => {
   const state = selectionPorts();
   const shell = new EditorShell(700, 600, state.ports);
