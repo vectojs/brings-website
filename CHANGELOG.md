@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added VMT-routed Delete and Backspace selection deletion as one undoable Core
+  command, including selection-restoring undo/redo, native-editor yielding, and
+  finalized DevTools keyboard-route coverage.
+- Upgraded to Brings Core 0.7.0.
 - Added focusable VMT design-canvas undo/redo shortcuts with native editor
   yielding and finalized DevTools keyboard-route assertions.
 - Upgraded to VectoJS Core 1.6.2 and DevTools 0.4.2.

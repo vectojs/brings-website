@@ -228,6 +228,202 @@ test('commits one drag command, preserves selection, and undoes the translation'
     ]);
 });
 
+test('deletes the selected Rectangle atomically and restores it through undo and redo', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await canvas.click({ position: { x: 180, y: 164 } });
+  await page.getByRole('button', { name: /Rectangle/ }).click();
+  await canvas.click({ position: { x: 220, y: 204 } });
+  await page.getByRole('button', { name: /Select/ }).click();
+  await canvas.click({ position: { x: 220, y: 204 } });
+  await expect(canvas).toBeFocused();
+
+  const readState = () =>
+    page.evaluate(() => {
+      const debug = Reflect.get(window, '__brings') as {
+        snapshot: () => {
+          document: { revision: number; nodes: readonly { id: string; type: string }[] };
+          selection: { nodeIds: readonly string[]; activeNodeId: string | null };
+          undoDepth: number;
+          redoDepth: number;
+        };
+      };
+      const snapshot = debug.snapshot();
+      const selectedNode = snapshot.document.nodes.find(
+        (node) => node.id === snapshot.selection.activeNodeId,
+      );
+      return {
+        revision: snapshot.document.revision,
+        nodeTypes: snapshot.document.nodes.map((node) => node.type),
+        selectedType: selectedNode?.type ?? null,
+        selectedCount: snapshot.selection.nodeIds.length,
+        undoDepth: snapshot.undoDepth,
+        redoDepth: snapshot.redoDepth,
+      };
+    });
+
+  await page.keyboard.press('Delete');
+  await expect.poll(readState).toEqual({
+    revision: 3,
+    nodeTypes: ['frame'],
+    selectedType: null,
+    selectedCount: 0,
+    undoDepth: 3,
+    redoDepth: 0,
+  });
+
+  await page.keyboard.press('Control+z');
+  await expect.poll(readState).toEqual({
+    revision: 4,
+    nodeTypes: ['frame', 'rectangle'],
+    selectedType: 'rectangle',
+    selectedCount: 1,
+    undoDepth: 2,
+    redoDepth: 1,
+  });
+
+  await page.keyboard.press('Control+Shift+z');
+  await expect.poll(readState).toEqual({
+    revision: 5,
+    nodeTypes: ['frame'],
+    selectedType: null,
+    selectedCount: 0,
+    undoDepth: 3,
+    redoDepth: 0,
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          trace: () => readonly {
+            type: string;
+            source: string;
+            key?: string;
+            targetId?: string;
+            defaultPrevented: boolean;
+          }[];
+        };
+        return debug
+          .trace()
+          .filter(
+            (entry) =>
+              entry.type === 'keydown' && ['delete', 'z'].includes(entry.key?.toLowerCase() ?? ''),
+          )
+          .slice(-3)
+          .map((entry) => ({
+            key: entry.key?.toLowerCase(),
+            source: entry.source,
+            targetId: entry.targetId,
+            defaultPrevented: entry.defaultPrevented,
+          }));
+      }),
+    )
+    .toEqual([
+      {
+        key: 'delete',
+        source: 'a11y',
+        targetId: 'brings-canvas-region',
+        defaultPrevented: true,
+      },
+      {
+        key: 'z',
+        source: 'a11y',
+        targetId: 'brings-canvas-region',
+        defaultPrevented: true,
+      },
+      {
+        key: 'z',
+        source: 'a11y',
+        targetId: 'brings-canvas-region',
+        defaultPrevented: true,
+      },
+    ]);
+});
+
+test('prevents Backspace on an empty canvas without changing document history', async ({
+  page,
+}) => {
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await canvas.focus();
+  await expect(canvas).toBeFocused();
+
+  const before = await page.evaluate(() => {
+    const debug = Reflect.get(window, '__brings') as {
+      snapshot: () => {
+        document: { revision: number };
+        undoDepth: number;
+        redoDepth: number;
+      };
+    };
+    const snapshot = debug.snapshot();
+    return {
+      revision: snapshot.document.revision,
+      undoDepth: snapshot.undoDepth,
+      redoDepth: snapshot.redoDepth,
+    };
+  });
+
+  await page.keyboard.press('Backspace');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          snapshot: () => {
+            document: { revision: number };
+            undoDepth: number;
+            redoDepth: number;
+          };
+          trace: () => readonly {
+            type: string;
+            source: string;
+            key?: string;
+            targetId?: string;
+            defaultPrevented: boolean;
+          }[];
+        };
+        const snapshot = debug.snapshot();
+        const entry = debug
+          .trace()
+          .findLast(
+            (candidate) =>
+              candidate.type === 'keydown' && candidate.key?.toLowerCase() === 'backspace',
+          );
+        return {
+          state: {
+            revision: snapshot.document.revision,
+            undoDepth: snapshot.undoDepth,
+            redoDepth: snapshot.redoDepth,
+          },
+          trace: entry
+            ? {
+                source: entry.source,
+                targetId: entry.targetId,
+                defaultPrevented: entry.defaultPrevented,
+              }
+            : null,
+        };
+      }),
+    )
+    .toEqual({
+      state: before,
+      trace: {
+        source: 'a11y',
+        targetId: 'brings-canvas-region',
+        defaultPrevented: true,
+      },
+    });
+});
+
 test('rolls back a canceled drag and exposes its terminal DevTools trace', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/?debug');
