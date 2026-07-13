@@ -4,6 +4,7 @@ export interface EditorShortcutEvent {
   readonly key?: string;
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
+  readonly altKey?: boolean;
   readonly shiftKey: boolean;
 }
 
@@ -13,7 +14,8 @@ export function resolveEditorShortcut(event: EditorShortcutEvent): EditorShortcu
   const primaryModifier = event.ctrlKey || event.metaKey;
   if (primaryModifier && key === 'z') return event.shiftKey ? 'redo' : 'undo';
   if (event.ctrlKey && key === 'y') return 'redo';
-  if (!primaryModifier && (key === 'delete' || key === 'backspace')) return 'delete';
+  const deletionModifier = primaryModifier || event.altKey === true || event.shiftKey;
+  if (!deletionModifier && (key === 'delete' || key === 'backspace')) return 'delete';
   return null;
 }
 

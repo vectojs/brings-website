@@ -19,6 +19,10 @@ describe('editor shortcuts', () => {
     [{ key: 'Delete', ctrlKey: false, metaKey: true, shiftKey: false }, null],
     [{ key: 'Backspace', ctrlKey: true, metaKey: false, shiftKey: false }, null],
     [{ key: 'Backspace', ctrlKey: false, metaKey: true, shiftKey: false }, null],
+    [{ key: 'Delete', ctrlKey: false, metaKey: false, altKey: true, shiftKey: false }, null],
+    [{ key: 'Backspace', ctrlKey: false, metaKey: false, altKey: true, shiftKey: false }, null],
+    [{ key: 'Delete', ctrlKey: false, metaKey: false, shiftKey: true }, null],
+    [{ key: 'Backspace', ctrlKey: false, metaKey: false, shiftKey: true }, null],
   ] as const)('resolves deletion event %o to %s', (event, expected) => {
     expect(resolveEditorShortcut(event)).toBe(expected);
   });
