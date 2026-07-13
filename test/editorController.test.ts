@@ -681,6 +681,58 @@ test('snapshots and normalizes a dynamic proposal before selecting and moving on
   expect({ deltaXReads, deltaYReads }).toEqual({ deltaXReads: 1, deltaYReads: 1 });
 });
 
+test('rejects an old move when a delta getter commits a newer selection', () => {
+  const controller = populatedController();
+  const start = controller.beginSelectionInteraction();
+  const oldProposal = unwrap(
+    controller.proposePointSelection({ start, point: pagePoint(20, 20), mode: 'replace' }),
+  ).proposal;
+  const newerProposal = unwrap(
+    controller.proposePointSelection({ start, point: pagePoint(110, 20), mode: 'replace' }),
+  ).proposal;
+  let deltaXReads = 0;
+  let deltaYReads = 0;
+  const delta = Object.defineProperties(
+    {},
+    {
+      x: {
+        get() {
+          deltaXReads += 1;
+          unwrap(controller.commitSelection(newerProposal));
+          return 8;
+        },
+      },
+      y: {
+        get() {
+          deltaYReads += 1;
+          return -4;
+        },
+      },
+    },
+  ) as PageDelta;
+
+  const result = controller.commitMove({ proposal: oldProposal, delta });
+
+  expect(result).toEqual({
+    ok: false,
+    error: { code: 'interaction.stale', path: '/interaction' },
+  });
+  expect(controller.debugInteractionState()).toMatchObject({
+    selectionGeneration: 1,
+    snapshot: {
+      selection: { nodeIds: [interactionIds.second], activeNodeId: interactionIds.second },
+      document: {
+        revision: 2,
+        nodes: [
+          { id: interactionIds.first, transform: [1, 0, 0, 1, 10, 10] },
+          { id: interactionIds.second, transform: [1, 0, 0, 1, 100, 10] },
+        ],
+      },
+    },
+  });
+  expect({ deltaXReads, deltaYReads }).toEqual({ deltaXReads: 1, deltaYReads: 1 });
+});
+
 test('Core-normalizes a caller-owned parent and child proposal before commit', () => {
   const ids = [
     '11111111-1111-4111-8111-111111111111',

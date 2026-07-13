@@ -211,13 +211,14 @@ export class BringsEditorController {
       delta: PageDelta;
     }>,
   ): Result<EditorSnapshot> {
+    const delta = input.delta;
+    const deltaX = delta.x;
+    const deltaY = delta.y;
     const prepared = this.prepareCommitProposal(input.proposal);
     if (!prepared.ok) return prepared;
     if (prepared.value.nodeIds.length === 0) {
       return this.failure('selection.empty', '/nodeIds');
     }
-    const deltaX = input.delta.x;
-    const deltaY = input.delta.y;
     const originalSelection = prepared.value.before.selection;
     const selected = this.store.setSelection(prepared.value.selection);
     if (!selected.ok) return selected;
