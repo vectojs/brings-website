@@ -159,3 +159,50 @@ test('commits one selected-node translation and restores it through undo', () =>
     redoDepth: 0,
   });
 });
+
+test('deletes the selected node as one undoable Core command', () => {
+  const ids = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    '44444444-4444-4444-8444-444444444444',
+  ];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (!id) throw new Error('fixture exhausted');
+    return id;
+  });
+
+  expect(controller.createFrameAt(80, 100).ok).toBe(true);
+  expect(controller.createRectangleAt(140, 160).ok).toBe(true);
+  expect(controller.selectAt(145, 165).ok).toBe(true);
+
+  expect(controller.deleteSelection()).toMatchObject({ ok: true });
+  expect(controller.snapshot()).toMatchObject({
+    document: { revision: 3, nodes: [{ type: 'frame', childIds: [] }] },
+    selection: { nodeIds: [], activeNodeId: null },
+    undoDepth: 3,
+  });
+
+  expect(controller.undo()).toMatchObject({ ok: true });
+  expect(controller.snapshot()).toMatchObject({
+    document: { revision: 4, nodes: [{ type: 'frame' }, { type: 'rectangle' }] },
+    selection: {
+      nodeIds: ['44444444-4444-4444-8444-444444444444'],
+      activeNodeId: '44444444-4444-4444-8444-444444444444',
+    },
+  });
+});
+
+test('treats empty-selection deletion as a successful byte-identical no-op', () => {
+  const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (!id) throw new Error('fixture exhausted');
+    return id;
+  });
+  const before = JSON.stringify(controller.snapshot());
+
+  expect(controller.deleteSelection()).toMatchObject({ ok: true });
+  expect(JSON.stringify(controller.snapshot())).toBe(before);
+});

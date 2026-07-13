@@ -121,6 +121,16 @@ export class BringsEditorController {
     });
   }
 
+  /** Delete the normalized selection as one Core command; empty selection is a no-op. */
+  public deleteSelection(): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    if (snapshot.selection.nodeIds.length === 0) return { ok: true, value: snapshot };
+    return this.store.execute({
+      kind: 'delete-nodes',
+      nodeIds: snapshot.selection.nodeIds,
+    });
+  }
+
   /** Undo the most recent durable Core command. */
   public undo(): Result<EditorSnapshot> {
     return this.store.undo();

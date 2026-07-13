@@ -19,6 +19,9 @@ declare global {
       redo: () => import('@vectojs/brings-core').Result<
         import('@vectojs/brings-core').EditorSnapshot
       >;
+      deleteSelection: () => import('@vectojs/brings-core').Result<
+        import('@vectojs/brings-core').EditorSnapshot
+      >;
     };
   }
 }
@@ -39,6 +42,7 @@ const shell = new EditorShell(
   (x, y) => editor.selectAt(x, y),
   (deltaX, deltaY) => editor.moveSelectionBy(deltaX, deltaY),
   (action) => (action === 'undo' ? editor.undo() : editor.redo()),
+  () => editor.deleteSelection(),
 );
 scene.add(shell);
 
@@ -76,6 +80,11 @@ if (new URLSearchParams(window.location.search).has('debug')) {
         },
         redo: () => {
           const result = editor.redo();
+          if (result.ok) scene.markDirty();
+          return result;
+        },
+        deleteSelection: () => {
+          const result = editor.deleteSelection();
           if (result.ok) scene.markDirty();
           return result;
         },
