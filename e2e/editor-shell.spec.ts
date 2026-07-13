@@ -77,3 +77,43 @@ test('creates a Frame and nested Rectangle through canvas-native tools', async (
       ],
     });
 });
+
+test('selects the frontmost shape from the canvas without changing document history', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await canvas.click({ position: { x: 180, y: 164 } });
+  await page.getByRole('button', { name: /Rectangle/ }).click();
+  await canvas.click({ position: { x: 220, y: 204 } });
+  await page.getByRole('button', { name: /Select/ }).click();
+  await canvas.click({ position: { x: 220, y: 204 } });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          snapshot: () => {
+            document: { revision: number; nodes: readonly { id: string; type: string }[] };
+            selection: { nodeIds: readonly string[]; activeNodeId: string | null };
+            undoDepth: number;
+          };
+        };
+        const snapshot = debug.snapshot();
+        const selectedNode = snapshot.document.nodes.find(
+          (node) => node.id === snapshot.selection.activeNodeId,
+        );
+        return {
+          revision: snapshot.document.revision,
+          undoDepth: snapshot.undoDepth,
+          selectedType: selectedNode?.type ?? null,
+          selectedCount: snapshot.selection.nodeIds.length,
+        };
+      }),
+    )
+    .toEqual({ revision: 2, undoDepth: 2, selectedType: 'rectangle', selectedCount: 1 });
+});

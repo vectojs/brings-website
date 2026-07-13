@@ -1,5 +1,6 @@
 import {
   createDocumentStore,
+  hitTestPage,
   type BringsError,
   type BringsDocumentStore,
   type EditorSnapshot,
@@ -96,6 +97,17 @@ export class BringsEditorController {
         stroke: null,
       },
     });
+  }
+
+  /** Select the frontmost eligible Core node at a page-space point. */
+  public selectAt(x: number, y: number): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    const [nodeId] = hitTestPage(snapshot.document, { x, y });
+    return this.store.setSelection(
+      nodeId === undefined
+        ? { nodeIds: [], activeNodeId: null }
+        : { nodeIds: [nodeId], activeNodeId: nodeId },
+    );
   }
 
   private failure(code: string, path: string): Result<never> {

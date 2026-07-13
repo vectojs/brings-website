@@ -56,6 +56,7 @@ class EditorRegion extends Entity {
 }
 
 type CreationTool = 'frame' | 'rectangle';
+type CanvasTool = 'select' | CreationTool;
 
 class ToolbarButton extends Entity {
   private active = false;
@@ -224,6 +225,10 @@ export class EditorShell extends Entity {
     '500 12px system-ui, sans-serif',
     '#475569',
   );
+  private readonly selectTool = new ToolbarButton('brings-select-tool', 'Select', () => {
+    this.activeTool = 'select';
+    this.scene?.markDirty();
+  });
   private readonly frameTool = new ToolbarButton('brings-frame-tool', 'Frame', () => {
     this.activeTool = 'frame';
     this.scene?.markDirty();
@@ -233,7 +238,7 @@ export class EditorShell extends Entity {
     this.scene?.markDirty();
   });
   private activeDrawer: DrawerSide | null = null;
-  private activeTool: CreationTool = 'frame';
+  private activeTool: CanvasTool = 'select';
   private layout: EditorLayout;
 
   public constructor(
@@ -262,6 +267,10 @@ export class EditorShell extends Entity {
       ok: false,
       error: { code: 'shape.unavailable', path: '/' },
     }),
+    private readonly selectAt: (x: number, y: number) => Result<EditorSnapshot> = () => ({
+      ok: false,
+      error: { code: 'selection.unavailable', path: '/' },
+    }),
   ) {
     super('brings-editor-shell');
     this.interactive = true;
@@ -270,6 +279,7 @@ export class EditorShell extends Entity {
     this.add(this.canvasRegion);
     this.add(this.properties);
     this.toolbar.add(this.title);
+    this.toolbar.add(this.selectTool);
     this.toolbar.add(this.frameTool);
     this.toolbar.add(this.rectangleTool);
     this.layers.add(this.pagesLabel);
@@ -283,7 +293,9 @@ export class EditorShell extends Entity {
       if (!this.authoringEnabled) return;
       const x = event.localX ?? 0;
       const y = event.localY ?? 0;
-      if (this.createAt(this.activeTool, x, y).ok) this.scene?.markDirty();
+      const result =
+        this.activeTool === 'select' ? this.selectAt(x, y) : this.createAt(this.activeTool, x, y);
+      if (result.ok) this.scene?.markDirty();
     });
     this.resize(width, height);
   }
@@ -380,8 +392,9 @@ export class EditorShell extends Entity {
       !this.authoringEnabled,
     );
     this.title.setFrame(20, 35, true);
-    this.frameTool.setFrame(120, 12, this.activeTool === 'frame');
-    this.rectangleTool.setFrame(216, 12, this.activeTool === 'rectangle');
+    this.selectTool.setFrame(120, 12, this.activeTool === 'select');
+    this.frameTool.setFrame(216, 12, this.activeTool === 'frame');
+    this.rectangleTool.setFrame(312, 12, this.activeTool === 'rectangle');
     this.pagesLabel.setFrame(20, 30, this.layers.interactive);
     this.layersLabel.setFrame(20, 72, this.layers.interactive);
     this.propertiesLabel.setFrame(20, 30, this.properties.interactive);
@@ -400,7 +413,9 @@ export class EditorShell extends Entity {
   }
 
   private renderDocument(renderer: IRenderer, originX: number, originY: number): void {
-    const document = this.documentSnapshot().document;
+    const snapshot = this.documentSnapshot();
+    const document = snapshot.document;
+    const selected = new Set(snapshot.selection.nodeIds);
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
     const renderNode = (node: SceneNode, parentX: number, parentY: number): void => {
       if (!node.visible) return;
@@ -414,6 +429,11 @@ export class EditorShell extends Entity {
         const fill = node.type === 'frame' ? node.background : node.fill;
         if (fill !== null) renderer.fill(this.paint(fill));
         if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+        if (selected.has(node.id)) {
+          renderer.beginPath();
+          renderer.roundRect(x - 2, y - 2, node.width + 4, node.height + 4, [...node.cornerRadii]);
+          renderer.stroke('#2563eb', 2);
+        }
         renderer.restore();
       }
       if (node.type === 'frame' || node.type === 'group') {
