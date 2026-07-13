@@ -88,6 +88,28 @@ test('creates a missing Pages CNAME, retries validation, and waits for activatio
   });
 });
 
+test('accepts activation returned by the final allowed status refresh', async () => {
+  const { options, calls } = harness([
+    apiResponse(pendingDomain),
+    apiResponse([
+      {
+        id: 'record-1',
+        type: 'CNAME',
+        name: optionsDomain,
+        content: 'brings-website.pages.dev',
+        proxied: true,
+      },
+    ]),
+    apiResponse(pendingDomain),
+    apiResponse(pendingDomain),
+    apiResponse(pendingDomain),
+    apiResponse({ ...pendingDomain, status: 'active' }),
+  ]);
+
+  await configurePagesDomain(options);
+  expect(calls.map(({ method }) => method)).toEqual(['GET', 'GET', 'PATCH', 'GET', 'GET', 'GET']);
+});
+
 test('associates the Pages domain before creating its DNS record', async () => {
   const { options, calls } = harness([
     apiResponse(null, 404),
