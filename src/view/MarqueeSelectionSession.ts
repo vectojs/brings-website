@@ -9,18 +9,40 @@ import {
   pageDeltaBetween,
   pageRectBetween,
   type EditorPagePoint,
+  type EditorPageRect,
   type PageDelta,
   type ViewportPoint,
 } from '../editor/selectionCoordinates';
 import type {
   SelectionInteractionStart,
+  SelectionInteractionToken,
   SelectionProposal,
   SelectionProposalProvider,
 } from '../editor/selectionInteraction';
 
 const GESTURE_THRESHOLD_SQUARED = 4 * 4;
+const INTERRUPTED = Symbol('marquee-session-interrupted');
+const IGNORE_EFFECT = Object.freeze({ kind: 'ignore' } as const);
 
 type SelectionGesturePhase = 'pending' | 'marquee' | 'moving' | 'terminal';
+
+type SnapshotGuard = () => boolean;
+
+type ResultFailure = Readonly<{ ok: false; error: BringsError }>;
+type ResultSuccess<T> = Readonly<{ ok: true; value: T }>;
+
+type PointerProposal = Readonly<{
+  proposal: SelectionProposal;
+  ownerId: NodeId | null;
+}>;
+
+type ProviderOutcome<T> =
+  Readonly<{ kind: 'interrupted' }> | Readonly<{ kind: 'result'; result: Result<T> }>;
+
+type AdvanceOutcome =
+  | Readonly<{ kind: 'below-threshold' }>
+  | Readonly<{ kind: 'interrupted' }>
+  | Readonly<{ kind: 'effect'; effect: SelectionGestureEffect }>;
 
 /** One browser-free pointer observation converted by the VectoJS view. */
 export type SelectionPointerSample = Readonly<{
@@ -59,28 +81,175 @@ export type SelectionGestureCancel =
   | Readonly<{ kind: 'escape' }>
   | Readonly<{ kind: 'error'; error: BringsError }>;
 
-function success<T>(value: T): Result<T> {
-  return { ok: true, value };
+function guardedRead<T>(read: () => T, guard?: SnapshotGuard): T {
+  const value = read();
+  if (guard !== undefined && !guard()) throw INTERRUPTED;
+  return value;
+}
+
+function frozenSuccess<T>(value: T): Result<T> {
+  return Object.freeze({ ok: true, value });
+}
+
+function frozenFailure(error: BringsError): Result<never> {
+  return Object.freeze({ ok: false, error });
+}
+
+function snapshotError(error: BringsError, guard?: SnapshotGuard): BringsError {
+  const code = guardedRead(() => error.code, guard);
+  const path = guardedRead(() => error.path, guard);
+  return Object.freeze({ code, path });
+}
+
+function providerThrew(path: '/provider/point' | '/provider/area'): BringsError {
+  return Object.freeze({ code: 'interaction.provider-threw', path });
 }
 
 function coordinateFailure(): BringsError {
-  return { code: 'interaction.coordinate-invalid', path: '/viewport/distance' };
+  return Object.freeze({
+    code: 'interaction.coordinate-invalid',
+    path: '/viewport/distance',
+  });
 }
 
-function copyViewportPoint(point: ViewportPoint): ViewportPoint {
-  return Object.freeze({ x: point.x, y: point.y }) as ViewportPoint;
+function snapshotNodeIds(nodeIds: readonly NodeId[], guard?: SnapshotGuard): readonly NodeId[] {
+  const length = guardedRead(() => nodeIds.length, guard);
+  const detached: NodeId[] = [];
+  for (let index = 0; index < length; index += 1) {
+    detached.push(guardedRead(() => nodeIds[index]!, guard));
+  }
+  return Object.freeze(detached);
 }
 
-function copyPagePoint(point: EditorPagePoint): EditorPagePoint {
-  return Object.freeze({ x: point.x, y: point.y }) as EditorPagePoint;
+function snapshotSelection(
+  selection: StructuralSelection,
+  guard?: SnapshotGuard,
+): StructuralSelection {
+  const sourceIds = guardedRead(() => selection.nodeIds, guard);
+  const activeNodeId = guardedRead(() => selection.activeNodeId, guard);
+  return Object.freeze({
+    nodeIds: snapshotNodeIds(sourceIds, guard),
+    activeNodeId,
+  });
+}
+
+function snapshotToken(
+  token: SelectionInteractionToken,
+  guard?: SnapshotGuard,
+): SelectionInteractionToken {
+  const documentRevision = guardedRead(() => token.documentRevision, guard);
+  const selectionGeneration = guardedRead(() => token.selectionGeneration, guard);
+  return Object.freeze({ documentRevision, selectionGeneration });
+}
+
+function snapshotStart(
+  start: SelectionInteractionStart,
+  guard?: SnapshotGuard,
+): SelectionInteractionStart {
+  const token = guardedRead(() => start.token, guard);
+  const selection = guardedRead(() => start.selection, guard);
+  return Object.freeze({
+    token: snapshotToken(token, guard),
+    selection: snapshotSelection(selection, guard),
+  });
+}
+
+function snapshotProposal(proposal: SelectionProposal, guard?: SnapshotGuard): SelectionProposal {
+  const token = guardedRead(() => proposal.token, guard);
+  const originalSelection = guardedRead(() => proposal.originalSelection, guard);
+  const selection = guardedRead(() => proposal.selection, guard);
+  return Object.freeze({
+    token: snapshotToken(token, guard),
+    originalSelection: snapshotSelection(originalSelection, guard),
+    selection: snapshotSelection(selection, guard),
+  });
+}
+
+function snapshotViewportPoint(point: ViewportPoint, guard?: SnapshotGuard): ViewportPoint {
+  const x = guardedRead(() => point.x, guard);
+  const y = guardedRead(() => point.y, guard);
+  return Object.freeze({ x, y }) as ViewportPoint;
+}
+
+function snapshotPagePoint(point: EditorPagePoint, guard?: SnapshotGuard): EditorPagePoint {
+  const x = guardedRead(() => point.x, guard);
+  const y = guardedRead(() => point.y, guard);
+  return Object.freeze({ x, y }) as EditorPagePoint;
+}
+
+function snapshotPageRect(rect: EditorPageRect): EditorPageRect {
+  const x = rect.x;
+  const y = rect.y;
+  const width = rect.width;
+  const height = rect.height;
+  return Object.freeze({ x, y, width, height }) as EditorPageRect;
+}
+
+function snapshotPageDelta(delta: PageDelta): PageDelta {
+  const x = delta.x;
+  const y = delta.y;
+  return Object.freeze({ x, y }) as PageDelta;
+}
+
+function snapshotSample(sample: SelectionPointerSample): SelectionPointerSample {
+  const pointerId = sample.pointerId;
+  const shiftKey = sample.shiftKey;
+  const viewportPoint = snapshotViewportPoint(sample.viewportPoint);
+  const pagePoint = snapshotPagePoint(sample.pagePoint);
+  return Object.freeze({ pointerId, viewportPoint, pagePoint, shiftKey });
+}
+
+function snapshotPointResult(
+  result: Result<PointerProposal>,
+  guard?: SnapshotGuard,
+): Result<PointerProposal> {
+  const ok = guardedRead(() => result.ok, guard);
+  if (!ok) {
+    const failure = result as ResultFailure;
+    const error = guardedRead(() => failure.error, guard);
+    return frozenFailure(snapshotError(error, guard));
+  }
+  const success = result as ResultSuccess<PointerProposal>;
+  const value = guardedRead(() => success.value, guard);
+  const ownerId = guardedRead(() => value.ownerId, guard);
+  const proposal = guardedRead(() => value.proposal, guard);
+  return frozenSuccess(Object.freeze({ ownerId, proposal: snapshotProposal(proposal, guard) }));
+}
+
+function snapshotAreaResult(
+  result: Result<SelectionProposal>,
+  guard?: SnapshotGuard,
+): Result<SelectionProposal> {
+  const ok = guardedRead(() => result.ok, guard);
+  if (!ok) {
+    const failure = result as ResultFailure;
+    const error = guardedRead(() => failure.error, guard);
+    return frozenFailure(snapshotError(error, guard));
+  }
+  const success = result as ResultSuccess<SelectionProposal>;
+  const proposal = guardedRead(() => success.value, guard);
+  return frozenSuccess(snapshotProposal(proposal, guard));
+}
+
+function freezePreview(visual: SelectionGestureVisual): SelectionGestureEffect {
+  return Object.freeze({ kind: 'preview', visual });
+}
+
+function freezeCommitSelection(proposal: SelectionProposal): SelectionGestureEffect {
+  return Object.freeze({ kind: 'commit-selection', proposal });
+}
+
+function freezeCommitMove(proposal: SelectionProposal, delta: PageDelta): SelectionGestureEffect {
+  return Object.freeze({ kind: 'commit-move', proposal, delta });
 }
 
 /**
- * Owns one pure selection gesture. It emits effects for the view to interpret
- * and never mutates a Scene, browser pointer, or Brings Core store directly.
+ * Owns one pure selection gesture. Public calls are transactional so nested
+ * provider or accessor calls cannot overwrite a newer preview or terminal.
  */
 export class MarqueeSelectionSession {
   private phase: SelectionGesturePhase = 'pending';
+  private stateVersion = 0;
   private currentProposal: SelectionProposal;
   private moveProposal: SelectionProposal | null = null;
   private latestVisual: SelectionGestureVisual | null = null;
@@ -97,25 +266,35 @@ export class MarqueeSelectionSession {
     this.currentProposal = beginProposal;
   }
 
-  /** Resolve the click proposal and capture immutable gesture ownership. */
+  /** Resolve and detach the click proposal before exposing a live session. */
   public static begin(
     start: SelectionInteractionStart,
     sample: SelectionPointerSample,
     provider: SelectionProposalProvider,
   ): Result<MarqueeSelectionSession> {
-    const ownerPointerId = sample.pointerId;
-    const frozenObjectShift = sample.shiftKey;
-    const startViewportPoint = copyViewportPoint(sample.viewportPoint);
-    const startPagePoint = copyPagePoint(sample.pagePoint);
-    const point = provider.point(start, startPagePoint, frozenObjectShift ? 'toggle' : 'replace');
+    const capturedStart = snapshotStart(start);
+    const capturedSample = snapshotSample(sample);
+    let point: Result<PointerProposal>;
+    try {
+      const callPoint = provider.point;
+      point = snapshotPointResult(
+        callPoint(
+          capturedStart,
+          capturedSample.pagePoint,
+          capturedSample.shiftKey ? 'toggle' : 'replace',
+        ),
+      );
+    } catch {
+      return frozenFailure(providerThrew('/provider/point'));
+    }
     if (!point.ok) return point;
-    return success(
+    return frozenSuccess(
       new MarqueeSelectionSession(
-        ownerPointerId,
-        startViewportPoint,
-        startPagePoint,
-        frozenObjectShift,
-        start,
+        capturedSample.pointerId,
+        capturedSample.viewportPoint,
+        capturedSample.pagePoint,
+        capturedSample.shiftKey,
+        capturedStart,
         point.value.ownerId,
         point.value.proposal,
       ),
@@ -127,10 +306,12 @@ export class MarqueeSelectionSession {
     sample: SelectionPointerSample,
     provider: SelectionProposalProvider,
   ): SelectionGestureEffect {
-    if (this.phase === 'terminal' || sample.pointerId !== this.ownerPointerId) {
-      return { kind: 'ignore' };
-    }
-    return this.advance(sample, provider);
+    if (this.phase === 'terminal') return IGNORE_EFFECT;
+    const version = this.stateVersion;
+    const captured = this.captureOwnerSample(sample, version);
+    if (captured === null) return IGNORE_EFFECT;
+    const outcome = this.advance(captured, provider, version);
+    return outcome.kind === 'effect' ? outcome.effect : IGNORE_EFFECT;
   }
 
   /** Perform one final calculation and emit exactly one terminal commit or discard. */
@@ -138,109 +319,208 @@ export class MarqueeSelectionSession {
     sample: SelectionPointerSample,
     provider: SelectionProposalProvider,
   ): SelectionGestureEffect {
-    if (this.phase === 'terminal' || sample.pointerId !== this.ownerPointerId) {
-      return { kind: 'ignore' };
+    if (this.phase === 'terminal') return IGNORE_EFFECT;
+    const version = this.stateVersion;
+    const captured = this.captureOwnerSample(sample, version);
+    if (captured === null) return IGNORE_EFFECT;
+    const outcome = this.advance(captured, provider, version);
+    if (outcome.kind === 'interrupted') return IGNORE_EFFECT;
+    if (outcome.kind === 'effect' && outcome.effect.kind === 'discard') {
+      return outcome.effect;
     }
-    const advanced = this.advance(sample, provider);
-    if (advanced.kind === 'discard') return advanced;
-
-    const completedPhase = this.phase;
-    this.phase = 'terminal';
-    if (completedPhase !== 'moving') {
-      return { kind: 'commit-selection', proposal: this.currentProposal };
+    if (this.phase !== 'moving') {
+      this.markTerminal();
+      return freezeCommitSelection(this.currentProposal);
     }
-
     const delta = this.latestVisual?.movementDelta;
     if (delta === null || delta === undefined) {
-      return this.discardAfterTerminal({
-        code: 'interaction.coordinate-invalid',
-        path: '/delta',
-      });
+      return this.discard(
+        Object.freeze({ code: 'interaction.coordinate-invalid', path: '/delta' }),
+      );
     }
     const deltaX = delta.x;
     const deltaY = delta.y;
-    if (deltaX === 0 && deltaY === 0) {
-      return { kind: 'commit-selection', proposal: this.currentProposal };
-    }
-    return { kind: 'commit-move', proposal: this.currentProposal, delta };
+    this.markTerminal();
+    return deltaX === 0 && deltaY === 0
+      ? freezeCommitSelection(this.currentProposal)
+      : freezeCommitMove(this.currentProposal, delta);
   }
 
   /** End the owner session without writing captured state back into Core. */
   public cancel(input: SelectionGestureCancel): SelectionGestureEffect {
-    if (this.phase === 'terminal') return { kind: 'ignore' };
-    if (input.kind === 'pointercancel' && input.pointerId !== this.ownerPointerId) {
-      return { kind: 'ignore' };
+    if (this.phase === 'terminal') return IGNORE_EFFECT;
+    const version = this.stateVersion;
+    try {
+      const kind = guardedRead(
+        () => input.kind,
+        () => this.isCurrent(version),
+      );
+      if (kind === 'pointercancel') {
+        const pointerCancel = input as Extract<SelectionGestureCancel, { kind: 'pointercancel' }>;
+        const pointerId = guardedRead(
+          () => pointerCancel.pointerId,
+          () => this.isCurrent(version),
+        );
+        if (pointerId !== this.ownerPointerId) return IGNORE_EFFECT;
+        this.markTerminal();
+        return Object.freeze({ kind: 'discard', reason: 'pointercancel' });
+      }
+      if (kind === 'error') {
+        const errorInput = input as Extract<SelectionGestureCancel, { kind: 'error' }>;
+        const error = guardedRead(
+          () => errorInput.error,
+          () => this.isCurrent(version),
+        );
+        const detachedError = snapshotError(error, () => this.isCurrent(version));
+        this.markTerminal();
+        return Object.freeze({ kind: 'discard', reason: 'error', error: detachedError });
+      }
+      this.markTerminal();
+      return Object.freeze({ kind: 'discard', reason: 'escape' });
+    } catch (error) {
+      if (error === INTERRUPTED) return IGNORE_EFFECT;
+      throw error;
     }
-    this.phase = 'terminal';
-    if (input.kind === 'error') {
-      return { kind: 'discard', reason: 'error', error: input.error };
+  }
+
+  private captureOwnerSample(
+    sample: SelectionPointerSample,
+    version: number,
+  ): SelectionPointerSample | null {
+    const current = () => this.isCurrent(version);
+    try {
+      const pointerId = guardedRead(() => sample.pointerId, current);
+      if (pointerId !== this.ownerPointerId) return null;
+      const shiftKey = guardedRead(() => sample.shiftKey, current);
+      const viewportSource = guardedRead(() => sample.viewportPoint, current);
+      const viewportPoint = snapshotViewportPoint(viewportSource, current);
+      const pageSource = guardedRead(() => sample.pagePoint, current);
+      const pagePoint = snapshotPagePoint(pageSource, current);
+      return Object.freeze({ pointerId, viewportPoint, pagePoint, shiftKey });
+    } catch (error) {
+      if (error === INTERRUPTED) return null;
+      throw error;
     }
-    return { kind: 'discard', reason: input.kind };
   }
 
   private advance(
     sample: SelectionPointerSample,
     provider: SelectionProposalProvider,
-  ): SelectionGestureEffect {
-    const currentViewportPoint = copyViewportPoint(sample.viewportPoint);
-    const distanceSquared = this.distanceSquared(currentViewportPoint);
-    if (!distanceSquared.ok) return this.discard(distanceSquared.error);
+    version: number,
+  ): AdvanceOutcome {
+    const distanceSquared = this.distanceSquared(sample.viewportPoint);
+    if (!distanceSquared.ok) return { kind: 'effect', effect: this.discard(distanceSquared.error) };
     if (this.phase === 'pending' && distanceSquared.value < GESTURE_THRESHOLD_SQUARED) {
-      return { kind: 'ignore' };
+      return { kind: 'below-threshold' };
     }
-
-    const currentPagePoint = copyPagePoint(sample.pagePoint);
-    if (this.ownerId === null) {
-      return this.advanceMarquee(currentPagePoint, sample.shiftKey, provider);
-    }
-    return this.advanceMove(currentPagePoint, provider);
+    return this.ownerId === null
+      ? this.advanceMarquee(sample, provider, version)
+      : this.advanceMove(sample.pagePoint, provider, version);
   }
 
   private advanceMarquee(
-    currentPagePoint: EditorPagePoint,
-    shiftKey: boolean,
+    sample: SelectionPointerSample,
     provider: SelectionProposalProvider,
-  ): SelectionGestureEffect {
-    const rect = pageRectBetween(this.startPagePoint, currentPagePoint);
-    if (!rect.ok) return this.discard(rect.error);
-    const proposal = provider.area(this.interactionStart, rect.value, shiftKey ? 'add' : 'replace');
-    if (!proposal.ok) return this.discard(proposal.error);
+    version: number,
+  ): AdvanceOutcome {
+    const rect = pageRectBetween(this.startPagePoint, sample.pagePoint);
+    if (!rect.ok) return { kind: 'effect', effect: this.discard(rect.error) };
+    const detachedRect = snapshotPageRect(rect.value);
+    const called = this.callAreaProvider(
+      provider,
+      detachedRect,
+      sample.shiftKey ? 'add' : 'replace',
+      version,
+    );
+    if (called.kind === 'interrupted') return called;
+    if (!called.result.ok) {
+      return { kind: 'effect', effect: this.discard(called.result.error) };
+    }
 
-    this.phase = 'marquee';
-    this.currentProposal = proposal.value;
-    this.latestVisual = {
-      selection: proposal.value.selection,
-      marquee: rect.value,
+    const proposal = called.result.value;
+    const visual = Object.freeze({
+      selection: proposal.selection,
+      marquee: detachedRect,
       movementDelta: null,
-    };
-    return { kind: 'preview', visual: this.latestVisual };
+    });
+    this.phase = 'marquee';
+    this.currentProposal = proposal;
+    this.latestVisual = visual;
+    this.stateVersion += 1;
+    return { kind: 'effect', effect: freezePreview(visual) };
   }
 
   private advanceMove(
     currentPagePoint: EditorPagePoint,
     provider: SelectionProposalProvider,
-  ): SelectionGestureEffect {
-    if (this.moveProposal === null) {
+    version: number,
+  ): AdvanceOutcome {
+    let proposal = this.moveProposal;
+    if (proposal === null) {
       const ownerWasSelected = this.interactionStart.selection.nodeIds.includes(this.ownerId!);
-      const proposal = provider.point(
-        this.interactionStart,
+      const called = this.callPointProvider(
+        provider,
         this.startPagePoint,
         this.frozenObjectShift || ownerWasSelected ? 'add-for-drag' : 'replace',
+        version,
       );
-      if (!proposal.ok) return this.discard(proposal.error);
-      this.moveProposal = proposal.value.proposal;
+      if (called.kind === 'interrupted') return called;
+      if (!called.result.ok) {
+        return { kind: 'effect', effect: this.discard(called.result.error) };
+      }
+      proposal = called.result.value.proposal;
     }
 
     const delta = pageDeltaBetween(this.startPagePoint, currentPagePoint);
-    if (!delta.ok) return this.discard(delta.error);
-    this.phase = 'moving';
-    this.currentProposal = this.moveProposal;
-    this.latestVisual = {
-      selection: this.currentProposal.selection,
+    if (!delta.ok) return { kind: 'effect', effect: this.discard(delta.error) };
+    const detachedDelta = snapshotPageDelta(delta.value);
+    const visual = Object.freeze({
+      selection: proposal.selection,
       marquee: null,
-      movementDelta: delta.value,
-    };
-    return { kind: 'preview', visual: this.latestVisual };
+      movementDelta: detachedDelta,
+    });
+    this.phase = 'moving';
+    this.moveProposal = proposal;
+    this.currentProposal = proposal;
+    this.latestVisual = visual;
+    this.stateVersion += 1;
+    return { kind: 'effect', effect: freezePreview(visual) };
+  }
+
+  private callPointProvider(
+    provider: SelectionProposalProvider,
+    point: EditorPagePoint,
+    mode: 'replace' | 'toggle' | 'add-for-drag',
+    version: number,
+  ): ProviderOutcome<PointerProposal> {
+    const current = () => this.isCurrent(version);
+    try {
+      const callPoint = guardedRead(() => provider.point, current);
+      const rawResult = callPoint(this.interactionStart, point, mode);
+      if (!current()) return { kind: 'interrupted' };
+      return { kind: 'result', result: snapshotPointResult(rawResult, current) };
+    } catch (error) {
+      if (error === INTERRUPTED || !current()) return { kind: 'interrupted' };
+      return { kind: 'result', result: frozenFailure(providerThrew('/provider/point')) };
+    }
+  }
+
+  private callAreaProvider(
+    provider: SelectionProposalProvider,
+    rect: EditorPageRect,
+    mode: 'replace' | 'add',
+    version: number,
+  ): ProviderOutcome<SelectionProposal> {
+    const current = () => this.isCurrent(version);
+    try {
+      const callArea = guardedRead(() => provider.area, current);
+      const rawResult = callArea(this.interactionStart, rect, mode);
+      if (!current()) return { kind: 'interrupted' };
+      return { kind: 'result', result: snapshotAreaResult(rawResult, current) };
+    } catch (error) {
+      if (error === INTERRUPTED || !current()) return { kind: 'interrupted' };
+      return { kind: 'result', result: frozenFailure(providerThrew('/provider/area')) };
+    }
   }
 
   private distanceSquared(current: ViewportPoint): Result<number> {
@@ -252,20 +532,26 @@ export class MarqueeSelectionSession {
     const deltaY = currentY - startY;
     const squared = deltaX * deltaX + deltaY * deltaY;
     return [startX, startY, currentX, currentY, deltaX, deltaY, squared].every(Number.isFinite)
-      ? success(squared)
-      : { ok: false, error: coordinateFailure() };
+      ? frozenSuccess(squared)
+      : frozenFailure(coordinateFailure());
+  }
+
+  private isCurrent(version: number): boolean {
+    return this.phase !== 'terminal' && this.stateVersion === version;
+  }
+
+  private markTerminal(): void {
+    this.phase = 'terminal';
+    this.stateVersion += 1;
   }
 
   private discard(error: BringsError): SelectionGestureEffect {
-    this.phase = 'terminal';
-    return {
+    const detachedError = snapshotError(error);
+    this.markTerminal();
+    return Object.freeze({
       kind: 'discard',
-      reason: error.code === 'interaction.stale' ? 'stale' : 'error',
-      error,
-    };
-  }
-
-  private discardAfterTerminal(error: BringsError): SelectionGestureEffect {
-    return { kind: 'discard', reason: 'error', error };
+      reason: detachedError.code === 'interaction.stale' ? 'stale' : 'error',
+      error: detachedError,
+    });
   }
 }

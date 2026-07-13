@@ -476,6 +476,480 @@ test('makes every terminal idempotent for all late methods', () => {
   expect(session.update(ownerSample, provider)).toEqual({ kind: 'ignore' });
 });
 
+test('lets reentrant cancellation from sample and area-provider getters win permanently', () => {
+  const start = interactionStart();
+  const sampleFixture = providerFixture({ ownerId: null });
+  const sampleSession = beginSession(start, pointerSample(28, 0, 0), sampleFixture.provider);
+  const current = pointerSample(28, 4, 0);
+  let sampleCancellation: SelectionGestureEffect | undefined;
+  const reentrantSample = Object.defineProperties(
+    {},
+    {
+      pointerId: { get: () => current.pointerId },
+      shiftKey: { get: () => current.shiftKey },
+      viewportPoint: {
+        get() {
+          sampleCancellation = sampleSession.cancel({ kind: 'escape' });
+          return current.viewportPoint;
+        },
+      },
+      pagePoint: { get: () => current.pagePoint },
+    },
+  ) as SelectionPointerSample;
+
+  expect(sampleSession.update(reentrantSample, sampleFixture.provider)).toEqual({ kind: 'ignore' });
+  expect(sampleCancellation).toEqual({ kind: 'discard', reason: 'escape' });
+  expect(sampleFixture.log.area).toHaveLength(0);
+  expect(sampleSession.finish(current, sampleFixture.provider)).toEqual({ kind: 'ignore' });
+
+  const areaFixture = providerFixture({ ownerId: null });
+  let areaSession: MarqueeSelectionSession;
+  let areaCancellation: SelectionGestureEffect | undefined;
+  const areaProvider: SelectionProposalProvider = {
+    point: areaFixture.provider.point,
+    area(areaStart, rect, mode) {
+      areaCancellation = areaSession.cancel({ kind: 'escape' });
+      return areaFixture.provider.area(areaStart, rect, mode);
+    },
+  };
+  areaSession = beginSession(start, pointerSample(29, 0, 0), areaProvider);
+
+  expect(areaSession.update(pointerSample(29, 4, 0), areaProvider)).toEqual({ kind: 'ignore' });
+  expect(areaCancellation).toEqual({ kind: 'discard', reason: 'escape' });
+  expect(areaSession.update(pointerSample(29, 8, 0), areaProvider)).toEqual({ kind: 'ignore' });
+});
+
+test('prevents move providers and nested finish calls from overwriting newer terminal state', () => {
+  const start = interactionStart();
+  const moveFixture = providerFixture({ ownerId: third });
+  let moveSession: MarqueeSelectionSession;
+  let moveCancellation: SelectionGestureEffect | undefined;
+  let pointCalls = 0;
+  const moveProvider: SelectionProposalProvider = {
+    point(pointStart, point, mode) {
+      pointCalls += 1;
+      if (pointCalls === 2) moveCancellation = moveSession.cancel({ kind: 'escape' });
+      return moveFixture.provider.point(pointStart, point, mode);
+    },
+    area: moveFixture.provider.area,
+  };
+  moveSession = beginSession(start, pointerSample(30, 0, 0), moveProvider);
+
+  expect(moveSession.update(pointerSample(30, 4, 0), moveProvider)).toEqual({ kind: 'ignore' });
+  expect(moveCancellation).toEqual({ kind: 'discard', reason: 'escape' });
+  expect(moveSession.finish(pointerSample(30, 8, 0), moveProvider)).toEqual({ kind: 'ignore' });
+
+  const outerFixture = providerFixture({ ownerId: null, areaIds: [third] });
+  const innerFixture = providerFixture({ ownerId: null, areaIds: [second] });
+  let nestedSession: MarqueeSelectionSession;
+  let nestedTerminal: SelectionGestureEffect | undefined;
+  const nestedProvider: SelectionProposalProvider = {
+    point: outerFixture.provider.point,
+    area(areaStart, rect, mode) {
+      nestedTerminal = nestedSession.finish(pointerSample(31, 8, 0), innerFixture.provider);
+      return outerFixture.provider.area(areaStart, rect, mode);
+    },
+  };
+  nestedSession = beginSession(start, pointerSample(31, 0, 0), nestedProvider);
+
+  expect(nestedSession.update(pointerSample(31, 4, 0), nestedProvider)).toEqual({ kind: 'ignore' });
+  expect(nestedTerminal).toMatchObject({
+    kind: 'commit-selection',
+    proposal: { selection: { nodeIds: [second] } },
+  });
+  expect(nestedSession.finish(pointerSample(31, 12, 0), nestedProvider)).toEqual({
+    kind: 'ignore',
+  });
+});
+
+test('keeps a nested update preview when the outer area provider resumes', () => {
+  const start = interactionStart();
+  const outerFixture = providerFixture({ ownerId: null, areaIds: [third] });
+  const innerFixture = providerFixture({ ownerId: null, areaIds: [second] });
+  let session: MarqueeSelectionSession;
+  let nestedPreview: SelectionGestureEffect | undefined;
+  const provider: SelectionProposalProvider = {
+    point: outerFixture.provider.point,
+    area(areaStart, rect, mode) {
+      nestedPreview = session.update(pointerSample(37, 8, 0), innerFixture.provider);
+      return outerFixture.provider.area(areaStart, rect, mode);
+    },
+  };
+  session = beginSession(start, pointerSample(37, 0, 0), provider);
+
+  expect(session.update(pointerSample(37, 4, 0), provider)).toEqual({ kind: 'ignore' });
+  expect(nestedPreview).toMatchObject({
+    kind: 'preview',
+    visual: {
+      selection: { nodeIds: [second] },
+      marquee: { x: 0, y: 0, width: 8, height: 0 },
+    },
+  });
+  expect(session.cancel({ kind: 'escape' })).toEqual({ kind: 'discard', reason: 'escape' });
+});
+
+test('maps thrown provider calls to stable terminal errors without retrying', () => {
+  const start = interactionStart();
+  const thrown = new Error('provider exploded');
+  const beginProvider: SelectionProposalProvider = {
+    point() {
+      throw thrown;
+    },
+    area() {
+      throw thrown;
+    },
+  };
+  const beginResult = MarqueeSelectionSession.begin(start, pointerSample(32, 0, 0), beginProvider);
+  expect(beginResult).toEqual({
+    ok: false,
+    error: { code: 'interaction.provider-threw', path: '/provider/point' },
+  });
+  expect(beginResult.ok ? false : Object.isFrozen(beginResult.error)).toBe(true);
+
+  const areaBase = providerFixture({ ownerId: null });
+  const areaProvider: SelectionProposalProvider = {
+    point: areaBase.provider.point,
+    area() {
+      throw thrown;
+    },
+  };
+  const areaSession = beginSession(start, pointerSample(33, 0, 0), areaProvider);
+  expect(areaSession.update(pointerSample(33, 4, 0), areaProvider)).toEqual({
+    kind: 'discard',
+    reason: 'error',
+    error: { code: 'interaction.provider-threw', path: '/provider/area' },
+  });
+  expect(areaSession.update(pointerSample(33, 8, 0), areaProvider)).toEqual({ kind: 'ignore' });
+
+  const moveBase = providerFixture({ ownerId: third });
+  let pointCalls = 0;
+  const moveProvider: SelectionProposalProvider = {
+    point(pointStart, point, mode) {
+      pointCalls += 1;
+      if (pointCalls === 2) throw thrown;
+      return moveBase.provider.point(pointStart, point, mode);
+    },
+    area: moveBase.provider.area,
+  };
+  const moveSession = beginSession(start, pointerSample(34, 0, 0), moveProvider);
+  const moveEffect = moveSession.finish(pointerSample(34, 4, 0), moveProvider);
+  expect(moveEffect).toEqual({
+    kind: 'discard',
+    reason: 'error',
+    error: { code: 'interaction.provider-threw', path: '/provider/point' },
+  });
+  expect(Object.isFrozen(moveEffect)).toBe(true);
+  if (moveEffect.kind !== 'discard') throw new Error('discard fixture failed');
+  expect(Object.isFrozen(moveEffect.error)).toBe(true);
+  expect(moveSession.cancel({ kind: 'escape' })).toEqual({ kind: 'ignore' });
+});
+
+test('snapshots provider accessors once and deep-freezes detached commit state', () => {
+  const start = interactionStart();
+  const mutableIds = [third];
+  const mutableOriginalIds = [first, second];
+  const mutableToken = { documentRevision: 7, selectionGeneration: 3 };
+  const reads = {
+    ok: 0,
+    value: 0,
+    ownerId: 0,
+    proposal: 0,
+    token: 0,
+    originalSelection: 0,
+    selection: 0,
+    nodeIds: 0,
+    activeNodeId: 0,
+  };
+  const getterSelection = Object.defineProperties(
+    {},
+    {
+      nodeIds: {
+        get() {
+          reads.nodeIds += 1;
+          return mutableIds;
+        },
+      },
+      activeNodeId: {
+        get() {
+          reads.activeNodeId += 1;
+          return third;
+        },
+      },
+    },
+  ) as StructuralSelection;
+  const getterProposal = Object.defineProperties(
+    {},
+    {
+      token: {
+        get() {
+          reads.token += 1;
+          return mutableToken;
+        },
+      },
+      originalSelection: {
+        get() {
+          reads.originalSelection += 1;
+          return { nodeIds: mutableOriginalIds, activeNodeId: second };
+        },
+      },
+      selection: {
+        get() {
+          reads.selection += 1;
+          return getterSelection;
+        },
+      },
+    },
+  ) as SelectionProposal;
+  const providerValue = Object.defineProperties(
+    {},
+    {
+      ownerId: {
+        get() {
+          reads.ownerId += 1;
+          return third;
+        },
+      },
+      proposal: {
+        get() {
+          reads.proposal += 1;
+          return getterProposal;
+        },
+      },
+    },
+  ) as Readonly<{ proposal: SelectionProposal; ownerId: NodeId | null }>;
+  const providerResult = Object.defineProperties(
+    {},
+    {
+      ok: {
+        get() {
+          reads.ok += 1;
+          return true;
+        },
+      },
+      value: {
+        get() {
+          reads.value += 1;
+          return providerValue;
+        },
+      },
+    },
+  ) as Result<Readonly<{ proposal: SelectionProposal; ownerId: NodeId | null }>>;
+  const provider: SelectionProposalProvider = {
+    point: () => providerResult,
+    area: () => ({ ok: true, value: getterProposal }),
+  };
+  const session = beginSession(start, pointerSample(35, 0, 0), provider);
+
+  expect(reads).toEqual({
+    ok: 1,
+    value: 1,
+    ownerId: 1,
+    proposal: 1,
+    token: 1,
+    originalSelection: 1,
+    selection: 1,
+    nodeIds: 1,
+    activeNodeId: 1,
+  });
+  mutableIds[0] = first;
+  mutableOriginalIds.length = 0;
+  mutableToken.selectionGeneration = 99;
+
+  const committed = session.finish(pointerSample(35, 0, 0), provider);
+  expect(committed).toEqual({
+    kind: 'commit-selection',
+    proposal: selectionProposal(start, [third]),
+  });
+  if (committed.kind !== 'commit-selection') throw new Error('commit fixture failed');
+  expect(Object.isFrozen(committed)).toBe(true);
+  expect(Object.isFrozen(committed.proposal)).toBe(true);
+  expect(Object.isFrozen(committed.proposal.token)).toBe(true);
+  expect(Object.isFrozen(committed.proposal.originalSelection)).toBe(true);
+  expect(Object.isFrozen(committed.proposal.originalSelection.nodeIds)).toBe(true);
+  expect(Object.isFrozen(committed.proposal.selection)).toBe(true);
+  expect(Object.isFrozen(committed.proposal.selection.nodeIds)).toBe(true);
+});
+
+test('detaches and freezes move proposals, visuals, derived values, and errors', () => {
+  const startIds = [first, second];
+  const mutableStart: SelectionInteractionStart = {
+    token: { documentRevision: 7, selectionGeneration: 3 },
+    selection: { nodeIds: startIds, activeNodeId: second },
+  };
+  const mutableMoveIds = [first, second, third];
+  const mutableMoveProposal: SelectionProposal = {
+    token: { documentRevision: 7, selectionGeneration: 3 },
+    originalSelection: { nodeIds: startIds, activeNodeId: second },
+    selection: { nodeIds: mutableMoveIds, activeNodeId: third },
+  };
+  let calls = 0;
+  let capturedStart: SelectionInteractionStart | undefined;
+  const provider: SelectionProposalProvider = {
+    point(pointStart) {
+      calls += 1;
+      capturedStart = pointStart;
+      return {
+        ok: true,
+        value: {
+          ownerId: third,
+          proposal: calls === 1 ? selectionProposal(pointStart, [third]) : mutableMoveProposal,
+        },
+      };
+    },
+    area: () => ({ ok: false, error: { code: 'unused', path: '/area' } }),
+  };
+  const session = beginSession(mutableStart, pointerSample(36, 0, 0, true), provider);
+  expect(Object.isFrozen(capturedStart)).toBe(true);
+  expect(Object.isFrozen(capturedStart?.token)).toBe(true);
+  expect(Object.isFrozen(capturedStart?.selection)).toBe(true);
+  expect(Object.isFrozen(capturedStart?.selection.nodeIds)).toBe(true);
+  const preview = session.update(pointerSample(36, 4, 0), provider);
+  expect(preview).toMatchObject({
+    kind: 'preview',
+    visual: { selection: { nodeIds: [first, second, third] }, movementDelta: { x: 4, y: 0 } },
+  });
+  if (preview.kind !== 'preview') throw new Error('preview fixture failed');
+  expect(Object.isFrozen(preview)).toBe(true);
+  expect(Object.isFrozen(preview.visual)).toBe(true);
+  expect(Object.isFrozen(preview.visual.selection)).toBe(true);
+  expect(Object.isFrozen(preview.visual.selection.nodeIds)).toBe(true);
+  expect(Object.isFrozen(preview.visual.movementDelta)).toBe(true);
+  startIds.length = 0;
+  mutableMoveIds[0] = second;
+  mutableMoveIds.length = 1;
+
+  const committed = session.finish(pointerSample(36, 8, 0), provider);
+  expect(committed).toMatchObject({
+    kind: 'commit-move',
+    proposal: { selection: { nodeIds: [first, second, third] } },
+    delta: { x: 8, y: 0 },
+  });
+  if (committed.kind !== 'commit-move') throw new Error('move fixture failed');
+  expect(Object.isFrozen(committed)).toBe(true);
+  expect(Object.isFrozen(committed.delta)).toBe(true);
+  expect(Object.isFrozen(committed.proposal.selection.nodeIds)).toBe(true);
+});
+
+test('snapshots every caller sample field once and freezes detached marquee previews', () => {
+  const start = interactionStart();
+  const mutableAreaIds = [third];
+  const mutableAreaProposal: SelectionProposal = {
+    token: { ...start.token },
+    originalSelection: structuralSelection(start.selection.nodeIds),
+    selection: { nodeIds: mutableAreaIds, activeNodeId: third },
+  };
+  const base = pointerSample(38, 4, 0, true);
+  const reads = {
+    pointerId: 0,
+    shiftKey: 0,
+    viewportPoint: 0,
+    viewportX: 0,
+    viewportY: 0,
+    pagePoint: 0,
+    pageX: 0,
+    pageY: 0,
+  };
+  const viewport = Object.defineProperties(
+    {},
+    {
+      x: {
+        get() {
+          reads.viewportX += 1;
+          return base.viewportPoint.x;
+        },
+      },
+      y: {
+        get() {
+          reads.viewportY += 1;
+          return base.viewportPoint.y;
+        },
+      },
+    },
+  ) as ViewportPoint;
+  const page = Object.defineProperties(
+    {},
+    {
+      x: {
+        get() {
+          reads.pageX += 1;
+          return base.pagePoint.x;
+        },
+      },
+      y: {
+        get() {
+          reads.pageY += 1;
+          return base.pagePoint.y;
+        },
+      },
+    },
+  ) as EditorPagePoint;
+  const sample = Object.defineProperties(
+    {},
+    {
+      pointerId: {
+        get() {
+          reads.pointerId += 1;
+          return base.pointerId;
+        },
+      },
+      shiftKey: {
+        get() {
+          reads.shiftKey += 1;
+          return base.shiftKey;
+        },
+      },
+      viewportPoint: {
+        get() {
+          reads.viewportPoint += 1;
+          return viewport;
+        },
+      },
+      pagePoint: {
+        get() {
+          reads.pagePoint += 1;
+          return page;
+        },
+      },
+    },
+  ) as SelectionPointerSample;
+  const beginFixture = providerFixture({ ownerId: null });
+  const provider: SelectionProposalProvider = {
+    point: beginFixture.provider.point,
+    area: () => ({ ok: true, value: mutableAreaProposal }),
+  };
+  const session = beginSession(start, pointerSample(38, 0, 0), provider);
+
+  const preview = session.update(sample, provider);
+
+  expect(reads).toEqual({
+    pointerId: 1,
+    shiftKey: 1,
+    viewportPoint: 1,
+    viewportX: 1,
+    viewportY: 1,
+    pagePoint: 1,
+    pageX: 1,
+    pageY: 1,
+  });
+  expect(preview).toMatchObject({
+    kind: 'preview',
+    visual: {
+      selection: { nodeIds: [third] },
+      marquee: { x: 0, y: 0, width: 4, height: 0 },
+    },
+  });
+  if (preview.kind !== 'preview' || preview.visual.marquee === null) {
+    throw new Error('marquee fixture failed');
+  }
+  expect(Object.isFrozen(preview)).toBe(true);
+  expect(Object.isFrozen(preview.visual)).toBe(true);
+  expect(Object.isFrozen(preview.visual.marquee)).toBe(true);
+  expect(Object.isFrozen(preview.visual.selection)).toBe(true);
+  expect(Object.isFrozen(preview.visual.selection.nodeIds)).toBe(true);
+  mutableAreaIds[0] = first;
+  expect(preview.visual.selection.nodeIds).toEqual([third]);
+});
+
 test('exposes only approved effect variants from the pure session contract', () => {
   const effects: SelectionGestureEffect[] = [
     { kind: 'ignore' },
