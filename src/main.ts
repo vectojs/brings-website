@@ -34,16 +34,15 @@ if (!canvas || !root) throw new Error('Brings requires its VectoJS root and canv
 const scene = new Scene(canvas, { disableWindowResize: true });
 scene.renderMode = 'onDemand';
 const editor = new BringsEditorController(() => crypto.randomUUID());
-const shell = new EditorShell(
-  1,
-  1,
-  () => editor.snapshot(),
-  (tool, x, y) => (tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y)),
-  (x, y) => editor.selectAt(x, y),
-  (deltaX, deltaY) => editor.moveSelectionBy(deltaX, deltaY),
-  (action) => (action === 'undo' ? editor.undo() : editor.redo()),
-  () => editor.deleteSelection(),
-);
+const shell = new EditorShell(1, 1, {
+  documentSnapshot: () => editor.snapshot(),
+  createAt: (tool, x, y) =>
+    tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y),
+  selectAt: (x, y) => editor.selectAt(x, y),
+  moveSelectionBy: (deltaX, deltaY) => editor.moveSelectionBy(deltaX, deltaY),
+  runHistory: (action) => (action === 'undo' ? editor.undo() : editor.redo()),
+  deleteSelection: () => editor.deleteSelection(),
+});
 scene.add(shell);
 
 const resize = (): void => {

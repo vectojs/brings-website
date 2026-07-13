@@ -62,10 +62,68 @@ class EditorRegion extends Entity {
   public override render(_renderer: IRenderer): void {}
 }
 
-type CreationTool = 'frame' | 'rectangle';
+export type CreationTool = 'frame' | 'rectangle';
 type CanvasTool = 'select' | CreationTool;
 type DragPreview = Readonly<{ deltaX: number; deltaY: number }>;
 type DragSession = Readonly<{ startX: number; startY: number }>;
+
+export interface EditorShellPorts {
+  readonly documentSnapshot?: () => EditorSnapshot;
+  readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
+  readonly selectAt?: (x: number, y: number) => Result<EditorSnapshot>;
+  readonly moveSelectionBy?: (deltaX: number, deltaY: number) => Result<EditorSnapshot>;
+  readonly runHistory?: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
+  readonly deleteSelection?: () => Result<EditorSnapshot>;
+}
+
+const DEFAULT_EDITOR_SHELL_PORTS: Required<EditorShellPorts> = {
+  documentSnapshot: () => ({
+    document: {
+      id: '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['id'],
+      revision: 0,
+      name: 'Untitled',
+      pageOrder: [],
+      activePageId:
+        '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['activePageId'],
+      pages: [],
+      nodes: [],
+    },
+    selection: { nodeIds: [], activeNodeId: null },
+    undoDepth: 0,
+    redoDepth: 0,
+  }),
+  createAt: () => ({
+    ok: false,
+    error: { code: 'shape.unavailable', path: '/' },
+  }),
+  selectAt: () => ({
+    ok: false,
+    error: { code: 'selection.unavailable', path: '/' },
+  }),
+  moveSelectionBy: () => ({
+    ok: false,
+    error: { code: 'transform.unavailable', path: '/' },
+  }),
+  runHistory: () => ({
+    ok: false,
+    error: { code: 'history.unavailable', path: '/' },
+  }),
+  deleteSelection: () => ({
+    ok: false,
+    error: { code: 'selection.delete-unavailable', path: '/' },
+  }),
+};
+
+function resolveEditorShellPorts(ports: EditorShellPorts): Required<EditorShellPorts> {
+  return {
+    documentSnapshot: ports.documentSnapshot ?? DEFAULT_EDITOR_SHELL_PORTS.documentSnapshot,
+    createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
+    selectAt: ports.selectAt ?? DEFAULT_EDITOR_SHELL_PORTS.selectAt,
+    moveSelectionBy: ports.moveSelectionBy ?? DEFAULT_EDITOR_SHELL_PORTS.moveSelectionBy,
+    runHistory: ports.runHistory ?? DEFAULT_EDITOR_SHELL_PORTS.runHistory,
+    deleteSelection: ports.deleteSelection ?? DEFAULT_EDITOR_SHELL_PORTS.deleteSelection,
+  };
+}
 
 class ToolbarButton extends Entity {
   private active = false;
@@ -252,56 +310,11 @@ export class EditorShell extends Entity {
   private dragSession: DragSession | null = null;
   private dragPreview: DragPreview | null = null;
   private layout: EditorLayout;
+  private readonly ports: Required<EditorShellPorts>;
 
-  public constructor(
-    width: number,
-    height: number,
-    private readonly documentSnapshot: () => EditorSnapshot = () => ({
-      document: {
-        id: '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['id'],
-        revision: 0,
-        name: 'Untitled',
-        pageOrder: [],
-        activePageId:
-          '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['activePageId'],
-        pages: [],
-        nodes: [],
-      },
-      selection: { nodeIds: [], activeNodeId: null },
-      undoDepth: 0,
-      redoDepth: 0,
-    }),
-    private readonly createAt: (
-      tool: CreationTool,
-      x: number,
-      y: number,
-    ) => Result<EditorSnapshot> = () => ({
-      ok: false,
-      error: { code: 'shape.unavailable', path: '/' },
-    }),
-    private readonly selectAt: (x: number, y: number) => Result<EditorSnapshot> = () => ({
-      ok: false,
-      error: { code: 'selection.unavailable', path: '/' },
-    }),
-    private readonly moveSelectionBy: (
-      deltaX: number,
-      deltaY: number,
-    ) => Result<EditorSnapshot> = () => ({
-      ok: false,
-      error: { code: 'transform.unavailable', path: '/' },
-    }),
-    private readonly runHistory: (
-      action: Exclude<EditorShortcutAction, 'delete'>,
-    ) => Result<EditorSnapshot> = () => ({
-      ok: false,
-      error: { code: 'history.unavailable', path: '/' },
-    }),
-    private readonly deleteSelection: () => Result<EditorSnapshot> = () => ({
-      ok: false,
-      error: { code: 'selection.delete-unavailable', path: '/' },
-    }),
-  ) {
+  public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
     super('brings-editor-shell');
+    this.ports = resolveEditorShellPorts(ports);
     this.interactive = true;
     this.add(this.toolbar);
     this.add(this.layers);
@@ -436,7 +449,7 @@ export class EditorShell extends Entity {
   }
 
   private renderDocument(renderer: IRenderer, originX: number, originY: number): void {
-    const snapshot = this.documentSnapshot();
+    const snapshot = this.ports.documentSnapshot();
     const document = snapshot.document;
     const selected = new Set(snapshot.selection.nodeIds);
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
@@ -501,19 +514,19 @@ export class EditorShell extends Entity {
       const deltaX = x - this.dragSession.startX;
       const deltaY = y - this.dragSession.startY;
       this.clearDragPreview();
-      if (deltaX !== 0 || deltaY !== 0) this.moveSelectionBy(deltaX, deltaY);
+      if (deltaX !== 0 || deltaY !== 0) this.ports.moveSelectionBy(deltaX, deltaY);
       this.scene?.markDirty();
       return;
     }
     if (event.type !== 'pointerdown') return;
 
     if (this.activeTool !== 'select') {
-      const result = this.createAt(this.activeTool, x, y);
+      const result = this.ports.createAt(this.activeTool, x, y);
       if (result.ok) this.scene?.markDirty();
       return;
     }
 
-    const result = this.selectAt(x, y);
+    const result = this.ports.selectAt(x, y);
     if (!result.ok) return;
     this.dragSession =
       result.value.selection.nodeIds.length === 0 ? null : { startX: x, startY: y };
@@ -534,7 +547,8 @@ export class EditorShell extends Entity {
 
     event.preventDefault();
     event.stopPropagation();
-    const result = action === 'delete' ? this.deleteSelection() : this.runHistory(action);
+    const result =
+      action === 'delete' ? this.ports.deleteSelection() : this.ports.runHistory(action);
     if (result.ok) this.scene?.markDirty();
   }
 
