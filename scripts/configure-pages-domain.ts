@@ -36,6 +36,9 @@ export type ConfigurePagesDomainOptions = Readonly<{
 
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const TERMINAL_DOMAIN_STATUSES = new Set(['deactivated', 'blocked', 'error']);
+// First-time Pages certificate validation can exceed one minute even after DNS
+// already serves the canonical site. Keep the deploy bounded but allow three minutes.
+const DEFAULT_ACTIVATION_ATTEMPTS = 90;
 
 function assertIdentifier(value: string, label: string, pattern: RegExp): void {
   if (!pattern.test(value)) throw new Error(`Invalid ${label}.`);
@@ -151,7 +154,7 @@ export async function configurePagesDomain(options: ConfigurePagesDomainOptions)
 
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const sleep = options.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
-  const activationAttempts = options.activationAttempts ?? 30;
+  const activationAttempts = options.activationAttempts ?? DEFAULT_ACTIVATION_ATTEMPTS;
   if (!Number.isSafeInteger(activationAttempts) || activationAttempts < 1) {
     throw new Error('activationAttempts must be a positive safe integer.');
   }
@@ -194,6 +197,10 @@ export async function configurePagesDomain(options: ConfigurePagesDomainOptions)
     domain = refreshed;
     assertDomainShape(domain, options.domainName);
     if (TERMINAL_DOMAIN_STATUSES.has(domain.status)) throw terminalDomainError(domain);
+    if (domain.status === 'active') {
+      console.log(`Cloudflare Pages domain ${options.domainName} is active.`);
+      return;
+    }
   }
 
   throw new Error(

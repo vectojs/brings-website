@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Extended first-time Pages domain activation polling to three minutes and
+  accepted activation returned by the final allowed status refresh.
 - Added VMT-routed Delete and Backspace selection deletion as one undoable Core
   command, including selection-restoring undo/redo, native-editor yielding, and
   finalized DevTools keyboard-route coverage.
