@@ -162,7 +162,6 @@ test('commits one drag command, preserves selection, and undoes the translation'
           undoDepth: number;
           redoDepth: number;
         };
-        undo: () => unknown;
       };
       const snapshot = debug.snapshot();
       const rectangle = snapshot.document.nodes.find((node) => node.type === 'rectangle');
@@ -183,10 +182,8 @@ test('commits one drag command, preserves selection, and undoes the translation'
     redoDepth: 0,
   });
 
-  await page.evaluate(() => {
-    const debug = Reflect.get(window, '__brings') as { undo: () => unknown };
-    debug.undo();
-  });
+  await expect(canvas).toBeFocused();
+  await page.keyboard.press('Control+z');
   await expect.poll(readState).toEqual({
     revision: 4,
     transform: [1, 0, 0, 1, 40, 40],
@@ -194,6 +191,41 @@ test('commits one drag command, preserves selection, and undoes the translation'
     undoDepth: 2,
     redoDepth: 1,
   });
+
+  await page.keyboard.press('Control+Shift+z');
+  await expect.poll(readState).toEqual({
+    revision: 5,
+    transform: [1, 0, 0, 1, 70, 60],
+    selected: true,
+    undoDepth: 3,
+    redoDepth: 0,
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          trace: () => readonly {
+            type: string;
+            key: string | null;
+            targetId: string | null;
+            defaultPrevented: boolean;
+          }[];
+        };
+        return debug
+          .trace()
+          .filter((entry) => entry.type === 'keydown' && entry.key?.toLowerCase() === 'z')
+          .slice(-2)
+          .map((entry) => ({
+            targetId: entry.targetId,
+            defaultPrevented: entry.defaultPrevented,
+          }));
+      }),
+    )
+    .toEqual([
+      { targetId: 'brings-canvas-region', defaultPrevented: true },
+      { targetId: 'brings-canvas-region', defaultPrevented: true },
+    ]);
 });
 
 test('rolls back a canceled drag and exposes its terminal DevTools trace', async ({ page }) => {

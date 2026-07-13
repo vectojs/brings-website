@@ -27,7 +27,7 @@ test('projects the named Brings application and primary editor regions', () => {
   expect(shell.children.slice(0, 4).map((child) => child.getA11yAttributes())).toEqual([
     { role: 'toolbar', label: 'Tools' },
     { role: 'tree', label: 'Layers' },
-    { role: 'region', label: 'Design canvas' },
+    { role: 'region', label: 'Design canvas', tabIndex: 0 },
     { role: 'group', label: 'Properties' },
   ]);
 });

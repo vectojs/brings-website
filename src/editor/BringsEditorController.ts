@@ -126,6 +126,11 @@ export class BringsEditorController {
     return this.store.undo();
   }
 
+  /** Reapply the most recently undone durable Core command. */
+  public redo(): Result<EditorSnapshot> {
+    return this.store.redo();
+  }
+
   private failure(code: string, path: string): Result<never> {
     const error: BringsError = { code, path };
     return { ok: false, error };

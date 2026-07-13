@@ -144,4 +144,18 @@ test('commits one selected-node translation and restores it through undo', () =>
     undoDepth: 2,
     redoDepth: 1,
   });
+
+  expect(controller.redo()).toMatchObject({ ok: true });
+  expect(controller.snapshot()).toMatchObject({
+    document: {
+      revision: 5,
+      nodes: [{ type: 'frame' }, { type: 'rectangle', transform: [1, 0, 0, 1, 90, 80] }],
+    },
+    selection: {
+      nodeIds: ['44444444-4444-4444-8444-444444444444'],
+      activeNodeId: '44444444-4444-4444-8444-444444444444',
+    },
+    undoDepth: 3,
+    redoDepth: 0,
+  });
 });
