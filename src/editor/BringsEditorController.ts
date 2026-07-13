@@ -40,6 +40,12 @@ type ControllerOptions = Readonly<{
   createStore?: (input: CreateDocumentInput) => Result<ControllerStore>;
 }>;
 
+type PreparedCommitProposal = Readonly<{
+  before: EditorSnapshot;
+  selection: StructuralSelection;
+  nodeIds: readonly NodeId[];
+}>;
+
 function cloneSelection(selection: StructuralSelection): StructuralSelection {
   return {
     nodeIds: [...selection.nodeIds],
@@ -190,10 +196,12 @@ export class BringsEditorController {
 
   /** Commit one normalized ephemeral selection if its interaction token is current. */
   public commitSelection(proposal: SelectionProposal): Result<EditorSnapshot> {
-    const validToken = this.validateToken(proposal.token);
-    if (!validToken.ok) return validToken;
-    const before = this.store.snapshot().selection;
-    return this.finishOperation(before, this.store.setSelection(proposal.selection));
+    const prepared = this.prepareCommitProposal(proposal);
+    if (!prepared.ok) return prepared;
+    return this.finishOperation(
+      prepared.value.before.selection,
+      this.store.setSelection(prepared.value.selection),
+    );
   }
 
   /** Atomically commit a proposed selection and one page-space translation. */
@@ -203,21 +211,30 @@ export class BringsEditorController {
       delta: PageDelta;
     }>,
   ): Result<EditorSnapshot> {
-    const validToken = this.validateToken(input.proposal.token);
-    if (!validToken.ok) return validToken;
-    if (input.proposal.selection.nodeIds.length === 0) {
+    const prepared = this.prepareCommitProposal(input.proposal);
+    if (!prepared.ok) return prepared;
+    if (prepared.value.nodeIds.length === 0) {
       return this.failure('selection.empty', '/nodeIds');
     }
-    const originalSelection = this.store.snapshot().selection;
-    const selected = this.store.setSelection(input.proposal.selection);
+    const deltaX = input.delta.x;
+    const deltaY = input.delta.y;
+    const originalSelection = prepared.value.before.selection;
+    const selected = this.store.setSelection(prepared.value.selection);
     if (!selected.ok) return selected;
-    const moved = this.store.execute({
-      kind: 'apply-transform-delta',
-      nodeIds: input.proposal.selection.nodeIds,
-      delta: [1, 0, 0, 1, input.delta.x, input.delta.y],
-    });
+
+    let moved: Result<EditorSnapshot>;
+    try {
+      moved = this.store.execute({
+        kind: 'apply-transform-delta',
+        nodeIds: prepared.value.nodeIds,
+        delta: [1, 0, 0, 1, deltaX, deltaY],
+      });
+    } catch (error) {
+      this.restoreSelectionOrThrow(originalSelection, error);
+      throw error;
+    }
     if (!moved.ok) {
-      this.store.setSelection(originalSelection);
+      this.restoreSelectionOrThrow(originalSelection, moved.error);
       return moved;
     }
     return this.finishOperation(originalSelection, moved);
@@ -363,6 +380,70 @@ export class BringsEditorController {
       current.selectionGeneration === token.selectionGeneration
       ? { ok: true, value: undefined }
       : this.failure('interaction.stale', '/interaction');
+  }
+
+  /** Detach untrusted caller state before validation or durable store mutation. */
+  private prepareCommitProposal(proposal: SelectionProposal): Result<PreparedCommitProposal> {
+    const tokenSource = proposal.token;
+    const token: SelectionInteractionToken = {
+      documentRevision: tokenSource.documentRevision,
+      selectionGeneration: tokenSource.selectionGeneration,
+    };
+    const selectionSource = proposal.selection;
+    const rawNodeIds: unknown = selectionSource.nodeIds;
+    const activeNodeId: unknown = selectionSource.activeNodeId;
+    const nodeIds = Array.isArray(rawNodeIds) ? [...rawNodeIds] : rawNodeIds;
+    const before = this.store.snapshot();
+
+    if (
+      before.document.revision !== token.documentRevision ||
+      this.selectionGeneration !== token.selectionGeneration
+    ) {
+      return this.failure('interaction.stale', '/interaction');
+    }
+
+    const normalized = resolveStructuralSelection(before.document, {
+      nodeIds: nodeIds as readonly string[],
+      activeNodeId: activeNodeId as string | null,
+    });
+    if (!normalized.ok) return normalized;
+    const normalizedNodeIds = [...normalized.value.nodeIds];
+    const selection: StructuralSelection = {
+      nodeIds: normalizedNodeIds,
+      activeNodeId: normalized.value.activeNodeId,
+    };
+    return {
+      ok: true,
+      value: {
+        before,
+        selection,
+        nodeIds: normalizedNodeIds,
+      },
+    };
+  }
+
+  /** Restore the pre-transaction selection or surface the broken atomicity invariant. */
+  private restoreSelectionOrThrow(
+    originalSelection: StructuralSelection,
+    operationCause: unknown,
+  ): void {
+    let restored: Result<EditorSnapshot>;
+    try {
+      restored = this.store.setSelection(originalSelection);
+    } catch (restorationCause) {
+      throw new Error('Controller invariant violation: selection restoration threw.', {
+        cause: new AggregateError(
+          [operationCause, restorationCause],
+          'The move operation and its selection restoration both failed.',
+        ),
+      });
+    }
+    if (!restored.ok) {
+      throw new Error(
+        `Controller invariant violation: selection restoration failed with ${restored.error.code} at ${restored.error.path}.`,
+        { cause: operationCause },
+      );
+    }
   }
 
   private finishOperation(

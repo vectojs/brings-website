@@ -7,6 +7,7 @@ import {
   type EditorSnapshot,
   type NodeId,
   type Result,
+  type StructuralSelection,
 } from '@vectojs/brings-core';
 import { BringsEditorController } from '../src/editor/BringsEditorController';
 import {
@@ -15,7 +16,9 @@ import {
   viewportPoint,
   viewportToPagePoint,
   type EditorPagePoint,
+  type PageDelta,
 } from '../src/editor/selectionCoordinates';
+import type { SelectionProposal } from '../src/editor/selectionInteraction';
 
 function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(JSON.stringify(result.error));
@@ -587,6 +590,126 @@ test('commits one atomic move revision and history entry for the proposed IDs', 
   expect(controller.beginSelectionInteraction().token.selectionGeneration).toBe(1);
 });
 
+test('snapshots and normalizes a dynamic proposal before selecting and moving one ID list', () => {
+  const controller = populatedController();
+  const start = controller.beginSelectionInteraction();
+  const [first, second] = controller.snapshot().document.nodes;
+  if (first === undefined || second === undefined) throw new Error('fixture nodes missing');
+  let proposalSelectionReads = 0;
+  let nodeIdsReads = 0;
+  let activeNodeIdReads = 0;
+  let idReads = 0;
+  let tokenReads = 0;
+  let deltaXReads = 0;
+  let deltaYReads = 0;
+  const changingIds = new Proxy([first.id], {
+    get(target, property, receiver) {
+      if (property === '0') {
+        idReads += 1;
+        return idReads === 1 ? first.id : second.id;
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const changingSelection = Object.defineProperties(
+    {},
+    {
+      nodeIds: {
+        get() {
+          nodeIdsReads += 1;
+          return changingIds;
+        },
+      },
+      activeNodeId: {
+        get() {
+          activeNodeIdReads += 1;
+          return first.id;
+        },
+      },
+    },
+  ) as StructuralSelection;
+  const proposal = Object.defineProperties(
+    {},
+    {
+      token: {
+        get() {
+          tokenReads += 1;
+          return tokenReads === 1
+            ? start.token
+            : { ...start.token, selectionGeneration: start.token.selectionGeneration + 1 };
+        },
+      },
+      originalSelection: { value: start.selection },
+      selection: {
+        get() {
+          proposalSelectionReads += 1;
+          return changingSelection;
+        },
+      },
+    },
+  ) as SelectionProposal;
+  const delta = Object.defineProperties(
+    {},
+    {
+      x: {
+        get() {
+          deltaXReads += 1;
+          return deltaXReads === 1 ? 8 : 800;
+        },
+      },
+      y: {
+        get() {
+          deltaYReads += 1;
+          return deltaYReads === 1 ? -4 : 400;
+        },
+      },
+    },
+  ) as PageDelta;
+
+  const moved = unwrap(controller.commitMove({ proposal, delta }));
+
+  expect(moved.selection).toEqual({ nodeIds: [first.id], activeNodeId: first.id });
+  expect(moved.document.nodes[0]?.transform).toEqual([1, 0, 0, 1, 18, 6]);
+  expect(moved.document.nodes[1]?.transform).toEqual([1, 0, 0, 1, 100, 10]);
+  expect({ proposalSelectionReads, nodeIdsReads, activeNodeIdReads, idReads, tokenReads }).toEqual({
+    proposalSelectionReads: 1,
+    nodeIdsReads: 1,
+    activeNodeIdReads: 1,
+    idReads: 1,
+    tokenReads: 1,
+  });
+  expect({ deltaXReads, deltaYReads }).toEqual({ deltaXReads: 1, deltaYReads: 1 });
+});
+
+test('Core-normalizes a caller-owned parent and child proposal before commit', () => {
+  const ids = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    '44444444-4444-4444-8444-444444444444',
+  ];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (id === undefined) throw new Error('fixture exhausted');
+    return id;
+  });
+  unwrap(controller.createFrameAt(80, 100));
+  unwrap(controller.createRectangleAt(140, 160));
+  const start = controller.beginSelectionInteraction();
+  const [frame, rectangle] = controller.snapshot().document.nodes;
+  if (frame === undefined || rectangle === undefined) throw new Error('fixture nodes missing');
+
+  const committed = unwrap(
+    controller.commitSelection({
+      token: start.token,
+      originalSelection: start.selection,
+      selection: { nodeIds: [frame.id, rectangle.id], activeNodeId: rectangle.id },
+    }),
+  );
+
+  expect(committed.selection).toEqual({ nodeIds: [frame.id], activeNodeId: frame.id });
+});
+
 test('restores byte-identical debug state when transform execution fails', () => {
   const controller = populatedController((input) => {
     const created = populatedStore(input);
@@ -622,6 +745,94 @@ test('restores byte-identical debug state when transform execution fails', () =>
     error: { code: 'test.transform-failed', path: '/delta' },
   });
   expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
+});
+
+test('restores selection after execute throws and rethrows the original exception', () => {
+  const executeError = new Error('test execute threw');
+  const controller = populatedController((input) => {
+    const created = populatedStore(input);
+    if (!created.ok) return created;
+    const store = created.value;
+    return {
+      ok: true,
+      value: {
+        snapshot: () => store.snapshot(),
+        setSelection: (selection) => store.setSelection(selection),
+        execute(command: DocumentCommandInput): Result<EditorSnapshot> {
+          if (command.kind === 'apply-transform-delta') throw executeError;
+          return store.execute(command);
+        },
+        undo: () => store.undo(),
+        redo: () => store.redo(),
+      },
+    };
+  });
+  const start = controller.beginSelectionInteraction();
+  const proposal = unwrap(
+    controller.proposePointSelection({ start, point: pagePoint(20, 20), mode: 'replace' }),
+  ).proposal;
+  const before = JSON.stringify(controller.debugInteractionState());
+  let caught: unknown;
+
+  try {
+    controller.commitMove({
+      proposal,
+      delta: unwrap(pageDeltaBetween(pagePoint(0, 0), pagePoint(10, 10))),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBe(executeError);
+  expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
+});
+
+test('throws a controller invariant error when selection restoration fails', () => {
+  const transformError = { code: 'test.transform-failed', path: '/delta' } as const;
+  let selectionWrites = 0;
+  const controller = populatedController((input) => {
+    const created = populatedStore(input);
+    if (!created.ok) return created;
+    const store = created.value;
+    return {
+      ok: true,
+      value: {
+        snapshot: () => store.snapshot(),
+        setSelection(selection): Result<EditorSnapshot> {
+          selectionWrites += 1;
+          return selectionWrites === 1
+            ? store.setSelection(selection)
+            : { ok: false, error: { code: 'test.restore-failed', path: '/selection' } };
+        },
+        execute(command: DocumentCommandInput): Result<EditorSnapshot> {
+          return command.kind === 'apply-transform-delta'
+            ? { ok: false, error: transformError }
+            : store.execute(command);
+        },
+        undo: () => store.undo(),
+        redo: () => store.redo(),
+      },
+    };
+  });
+  const start = controller.beginSelectionInteraction();
+  const proposal = unwrap(
+    controller.proposePointSelection({ start, point: pagePoint(20, 20), mode: 'replace' }),
+  ).proposal;
+  let caught: unknown;
+
+  try {
+    controller.commitMove({
+      proposal,
+      delta: unwrap(pageDeltaBetween(pagePoint(0, 0), pagePoint(10, 10))),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(Error);
+  expect((caught as Error).message).toContain('test.restore-failed at /selection');
+  expect((caught as Error).cause).toEqual(transformError);
+  expect(controller.beginSelectionInteraction().token.selectionGeneration).toBe(0);
 });
 
 test('tracks selection generation only when successful operations change selection', () => {
