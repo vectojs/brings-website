@@ -87,6 +87,106 @@ test('rejects non-finite derived rectangle and delta arithmetic', () => {
   });
 });
 
+test('snapshots accessor-backed viewport coordinates exactly once', () => {
+  let xReads = 0;
+  let yReads = 0;
+  const point = Object.defineProperties(
+    {},
+    {
+      x: {
+        get() {
+          xReads += 1;
+          return xReads === 1 ? 12 : Number.NaN;
+        },
+      },
+      y: {
+        get() {
+          yReads += 1;
+          return yReads === 1 ? 18 : Number.NaN;
+        },
+      },
+    },
+  ) as ViewportPoint;
+
+  const result = viewportToPagePoint(point);
+
+  expect(result).toMatchObject({ ok: true, value: { x: 12, y: 18 } });
+  expect(xReads).toBe(1);
+  expect(yReads).toBe(1);
+});
+
+test('derives rectangles consistently from one proxy read per coordinate', () => {
+  const reads = { startX: 0, startY: 0, currentX: 0, currentY: 0 };
+  const start = new Proxy({} as EditorPagePoint, {
+    get(_target, property) {
+      if (property === 'x') {
+        reads.startX += 1;
+        return reads.startX === 1 ? 12 : Number.NaN;
+      }
+      if (property === 'y') {
+        reads.startY += 1;
+        return reads.startY === 1 ? 18 : Number.NaN;
+      }
+      return undefined;
+    },
+  });
+  const current = new Proxy({} as EditorPagePoint, {
+    get(_target, property) {
+      if (property === 'x') {
+        reads.currentX += 1;
+        return reads.currentX === 1 ? 2 : Number.NaN;
+      }
+      if (property === 'y') {
+        reads.currentY += 1;
+        return reads.currentY === 1 ? 3 : Number.NaN;
+      }
+      return undefined;
+    },
+  });
+
+  expect(pageRectBetween(start, current)).toMatchObject({
+    ok: true,
+    value: { x: 2, y: 3, width: 10, height: 15 },
+  });
+  expect(reads).toEqual({ startX: 1, startY: 1, currentX: 1, currentY: 1 });
+});
+
+test('rejects a snapshotted non-finite proxy delta without rereading it', () => {
+  const reads = { startX: 0, startY: 0, currentX: 0, currentY: 0 };
+  const start = new Proxy({} as EditorPagePoint, {
+    get(_target, property) {
+      if (property === 'x') {
+        reads.startX += 1;
+        return 12;
+      }
+      if (property === 'y') {
+        reads.startY += 1;
+        return 18;
+      }
+      return undefined;
+    },
+  });
+  const current = new Proxy({} as EditorPagePoint, {
+    get(_target, property) {
+      if (property === 'x') {
+        reads.currentX += 1;
+        return reads.currentX === 1 ? Number.POSITIVE_INFINITY : 2;
+      }
+      if (property === 'y') {
+        reads.currentY += 1;
+        return 3;
+      }
+      return undefined;
+    },
+  });
+
+  expect(pageDeltaBetween(start, current)).toEqual({
+    ok: false,
+    error: { code: 'interaction.coordinate-invalid', path: '/delta' },
+  });
+  expect(reads).toEqual({ startX: 1, startY: 1, currentX: 1, currentY: 1 });
+});
+
 test('keeps viewport, page, rectangle, and delta values nominally separate', () => {
   const viewport = unwrap(viewportPoint(12, 18));
   const page = unwrap(viewportToPagePoint(viewport));

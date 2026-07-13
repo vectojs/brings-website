@@ -55,9 +55,11 @@ export function viewportPoint(x: number, y: number): Result<ViewportPoint> {
 
 /** Convert a validated viewport point through the current identity viewport transform. */
 export function viewportToPagePoint(point: ViewportPoint): Result<EditorPagePoint> {
-  if (!Number.isFinite(point.x)) return failure('/page/x');
-  if (!Number.isFinite(point.y)) return failure('/page/y');
-  return success(Object.freeze({ x: point.x, y: point.y }) as EditorPagePoint);
+  const x = point.x;
+  const y = point.y;
+  if (!Number.isFinite(x)) return failure('/page/x');
+  if (!Number.isFinite(y)) return failure('/page/y');
+  return success(Object.freeze({ x, y }) as EditorPagePoint);
 }
 
 /** Normalize two page points into a positive-size page rectangle. */
@@ -65,10 +67,15 @@ export function pageRectBetween(
   start: EditorPagePoint,
   current: EditorPagePoint,
 ): Result<EditorPageRect> {
-  const x = Math.min(start.x, current.x);
-  const y = Math.min(start.y, current.y);
-  const width = Math.max(start.x, current.x) - x;
-  const height = Math.max(start.y, current.y) - y;
+  const startX = start.x;
+  const startY = start.y;
+  const currentX = current.x;
+  const currentY = current.y;
+  if (![startX, startY, currentX, currentY].every(Number.isFinite)) return failure('/rect');
+  const x = Math.min(startX, currentX);
+  const y = Math.min(startY, currentY);
+  const width = Math.max(startX, currentX) - x;
+  const height = Math.max(startY, currentY) - y;
   if (![x, y, width, height].every(Number.isFinite)) return failure('/rect');
   return success(Object.freeze({ x, y, width, height }) as EditorPageRect);
 }
@@ -78,8 +85,13 @@ export function pageDeltaBetween(
   start: EditorPagePoint,
   current: EditorPagePoint,
 ): Result<PageDelta> {
-  const x = current.x - start.x;
-  const y = current.y - start.y;
+  const startX = start.x;
+  const startY = start.y;
+  const currentX = current.x;
+  const currentY = current.y;
+  if (![startX, startY, currentX, currentY].every(Number.isFinite)) return failure('/delta');
+  const x = currentX - startX;
+  const y = currentY - startY;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return failure('/delta');
   return success(Object.freeze({ x, y }) as PageDelta);
 }
