@@ -316,7 +316,6 @@ test('deletes the selected Rectangle atomically and restores it through undo and
             (entry) =>
               entry.type === 'keydown' && ['delete', 'z'].includes(entry.key?.toLowerCase() ?? ''),
           )
-          .slice(-3)
           .map((entry) => ({
             key: entry.key?.toLowerCase(),
             source: entry.source,
