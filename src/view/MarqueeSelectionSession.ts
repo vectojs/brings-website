@@ -3,6 +3,7 @@ import type {
   NodeId,
   PageRect,
   Result,
+  SelectionResizeProposal,
   StructuralSelection,
 } from '@vectojs/brings-core';
 import {
@@ -18,6 +19,7 @@ import type {
   SelectionInteractionToken,
   SelectionProposal,
   SelectionProposalProvider,
+  ResizeInteractionProposal,
 } from '../editor/selectionInteraction';
 
 const GESTURE_THRESHOLD_SQUARED = 4 * 4;
@@ -72,9 +74,24 @@ export type SelectionGestureSessionSnapshot = Readonly<{
 /** Transient canvas-native state produced without mutating Brings Core. */
 export type SelectionGestureVisual = Readonly<{
   selection: StructuralSelection;
-  marquee: PageRect | null;
-  movementDelta: PageDelta | null;
-}>;
+}> &
+  (
+    | Readonly<{
+        marquee: PageRect | null;
+        movementDelta: null;
+        resize?: never;
+      }>
+    | Readonly<{
+        marquee: null;
+        movementDelta: PageDelta;
+        resize?: never;
+      }>
+    | Readonly<{
+        marquee: null;
+        movementDelta: null;
+        resize: SelectionResizeProposal;
+      }>
+  );
 
 /** One declarative instruction interpreted by the VectoJS view. */
 export type SelectionGestureEffect =
@@ -85,9 +102,10 @@ export type SelectionGestureEffect =
       proposal: SelectionProposal;
       delta: PageDelta;
     }>
+  | Readonly<{ kind: 'commit-resize'; proposal: ResizeInteractionProposal }>
   | Readonly<{
       kind: 'discard';
-      reason: 'pointercancel' | 'escape' | 'stale' | 'error';
+      reason: 'pointercancel' | 'escape' | 'stale' | 'error' | 'no-change';
       error?: BringsError;
     }>
   | Readonly<{ kind: 'ignore' }>;

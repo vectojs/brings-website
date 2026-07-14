@@ -922,3 +922,139 @@ test('tracks selection generation only when successful operations change selecti
   unwrap(controller.redo());
   expect(generation()).toBe(8);
 });
+
+test('prepares detached resize geometry and commits the exact proposal as one history entry', () => {
+  const controller = populatedController();
+  unwrap(controller.selectAt(20, 20));
+  const start = unwrap(controller.beginResizeInteraction());
+  const handle = start.handles.find((entry) => entry.handle === 'south-east');
+  if (handle === undefined) throw new Error('south-east fixture handle missing');
+  const input = {
+    handle: handle.handle,
+    startPoint: { x: handle.point.x + 3, y: handle.point.y + 2 },
+    currentPoint: { x: handle.point.x + 53, y: handle.point.y + 52 },
+    preserveAspectRatio: false,
+    fromCenter: false,
+  } as const;
+  const proposal = unwrap(controller.proposeResize({ start, input }));
+  const command = proposal.resize.command;
+  const before = controller.snapshot();
+
+  expect(start).toMatchObject({
+    token: { documentRevision: 2, selectionGeneration: 1 },
+    selection: { nodeIds: [interactionIds.first], activeNodeId: interactionIds.first },
+    bounds: { minX: 10, minY: 10, maxX: 60, maxY: 60 },
+  });
+  expect(Object.isFrozen(start)).toBe(true);
+  expect(Object.isFrozen(start.handles)).toBe(true);
+  expect(Object.isFrozen(proposal)).toBe(true);
+  expect(Object.isFrozen(command.delta)).toBe(true);
+
+  const committed = unwrap(controller.commitResize(proposal));
+  expect(committed).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    selection: start.selection,
+    undoDepth: before.undoDepth + 1,
+  });
+  expect(committed.document.nodes[0]?.transform).toEqual([
+    command.delta[0],
+    command.delta[1],
+    command.delta[2],
+    command.delta[3],
+    10,
+    10,
+  ]);
+  expect(controller.beginSelectionInteraction().token.selectionGeneration).toBe(1);
+  expect(unwrap(controller.undo()).document.nodes[0]?.transform).toEqual([1, 0, 0, 1, 10, 10]);
+});
+
+test('rejects stale and forged resize proposals without changing controller state', () => {
+  const controller = populatedController();
+  unwrap(controller.selectAt(20, 20));
+  const start = unwrap(controller.beginResizeInteraction());
+  const handle = start.handles.find((entry) => entry.handle === 'east');
+  if (handle === undefined) throw new Error('east fixture handle missing');
+  const proposal = unwrap(
+    controller.proposeResize({
+      start,
+      input: {
+        handle: 'east',
+        startPoint: handle.point,
+        currentPoint: { x: handle.point.x + 20, y: handle.point.y },
+        preserveAspectRatio: false,
+        fromCenter: false,
+      },
+    }),
+  );
+  const before = JSON.stringify(controller.debugInteractionState());
+  const forged = {
+    ...proposal,
+    resize: {
+      ...proposal.resize,
+      command: { ...proposal.resize.command, delta: [9, 0, 0, 1, 0, 0] },
+    },
+  } as typeof proposal;
+
+  expect(controller.commitResize(forged)).toEqual({
+    ok: false,
+    error: { code: 'interaction.resize-mismatch', path: '/resize' },
+  });
+  expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
+
+  unwrap(controller.moveSelectionBy(1, 0));
+  const afterMove = JSON.stringify(controller.debugInteractionState());
+  expect(controller.commitResize(proposal)).toEqual({
+    ok: false,
+    error: { code: 'interaction.stale', path: '/interaction' },
+  });
+  expect(JSON.stringify(controller.debugInteractionState())).toBe(afterMove);
+});
+
+test('leaves document, selection, and history byte-identical when resize execution fails', () => {
+  let executed: DocumentCommandInput | undefined;
+  const controller = populatedController((input) => {
+    const created = populatedStore(input);
+    if (!created.ok) return created;
+    const store = created.value;
+    return {
+      ok: true,
+      value: {
+        snapshot: () => store.snapshot(),
+        setSelection: (selection) => store.setSelection(selection),
+        execute(command: DocumentCommandInput): Result<EditorSnapshot> {
+          if (command.kind === 'apply-transform-delta') {
+            executed = command;
+            return { ok: false, error: { code: 'test.resize-failed', path: '/delta' } };
+          }
+          return store.execute(command);
+        },
+        undo: () => store.undo(),
+        redo: () => store.redo(),
+      },
+    };
+  });
+  unwrap(controller.selectAt(20, 20));
+  const start = unwrap(controller.beginResizeInteraction());
+  const handle = start.handles.find((entry) => entry.handle === 'south-east');
+  if (handle === undefined) throw new Error('south-east fixture handle missing');
+  const proposal = unwrap(
+    controller.proposeResize({
+      start,
+      input: {
+        handle: 'south-east',
+        startPoint: handle.point,
+        currentPoint: { x: handle.point.x + 50, y: handle.point.y + 50 },
+        preserveAspectRatio: false,
+        fromCenter: false,
+      },
+    }),
+  );
+  const before = JSON.stringify(controller.debugInteractionState());
+
+  expect(controller.commitResize(proposal)).toEqual({
+    ok: false,
+    error: { code: 'test.resize-failed', path: '/delta' },
+  });
+  expect(executed).toEqual(proposal.resize.command);
+  expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
+});

@@ -5,7 +5,14 @@ import {
   type IRenderer,
   type VectoJSEvent,
 } from '@vectojs/core';
-import type { BringsError, EditorSnapshot, Matrix, Result, SceneNode } from '@vectojs/brings-core';
+import type {
+  BringsError,
+  EditorSnapshot,
+  Matrix,
+  Result,
+  SceneNode,
+  SelectionResizeProposal,
+} from '@vectojs/brings-core';
 import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
 import type {
   SelectionInteractionStart,
@@ -164,11 +171,40 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
   if (visual === null) return null;
   const marquee = visual.marquee;
   const movementDelta = visual.movementDelta;
+  const resize = visual.resize;
+  const selection = Object.freeze({
+    nodeIds: Object.freeze([...visual.selection.nodeIds]),
+    activeNodeId: visual.selection.activeNodeId,
+  });
+  if (resize !== undefined) {
+    const detachedResize: SelectionResizeProposal = Object.freeze({
+      handle: resize.handle,
+      anchor: Object.freeze({ x: resize.anchor.x, y: resize.anchor.y }),
+      scaleX: resize.scaleX,
+      scaleY: resize.scaleY,
+      bounds: Object.freeze({ ...resize.bounds }),
+      command: Object.freeze({
+        kind: resize.command.kind,
+        nodeIds: Object.freeze([...resize.command.nodeIds]),
+        delta: Object.freeze([...resize.command.delta]) as Matrix,
+      }),
+    });
+    return Object.freeze({
+      selection,
+      marquee: null,
+      movementDelta: null,
+      resize: detachedResize,
+    });
+  }
+  if (movementDelta !== null) {
+    return Object.freeze({
+      selection,
+      marquee: null,
+      movementDelta: Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta,
+    });
+  }
   return Object.freeze({
-    selection: Object.freeze({
-      nodeIds: Object.freeze([...visual.selection.nodeIds]),
-      activeNodeId: visual.selection.activeNodeId,
-    }),
+    selection,
     marquee:
       marquee === null
         ? null
@@ -178,10 +214,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
             width: marquee.width,
             height: marquee.height,
           }),
-    movementDelta:
-      movementDelta === null
-        ? null
-        : (Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta),
+    movementDelta: null,
   });
 }
 

@@ -1,4 +1,12 @@
-import type { NodeId, Result, StructuralSelection } from '@vectojs/brings-core';
+import type {
+  NodeId,
+  ResizeBounds,
+  ResizeHandlePosition,
+  Result,
+  SelectionResizeProposal,
+  SelectionResizeProposalInput,
+  StructuralSelection,
+} from '@vectojs/brings-core';
 import type { EditorPagePoint, EditorPageRect } from './selectionCoordinates';
 
 /** Durable and ephemeral versions captured when one selection gesture begins. */
@@ -20,6 +28,22 @@ export type SelectionProposal = Readonly<{
   selection: StructuralSelection;
 }>;
 
+/** Detached Core resize geometry captured with one interaction token. */
+export type ResizeInteractionStart = Readonly<{
+  token: SelectionInteractionToken;
+  selection: StructuralSelection;
+  bounds: ResizeBounds;
+  handles: readonly ResizeHandlePosition[];
+}>;
+
+/** One token-bound Core resize proposal safe to preview and commit exactly once. */
+export type ResizeInteractionProposal = Readonly<{
+  token: SelectionInteractionToken;
+  selection: StructuralSelection;
+  input: SelectionResizeProposalInput;
+  resize: SelectionResizeProposal;
+}>;
+
 export type PointSelectionMode = 'replace' | 'toggle' | 'add-for-drag';
 export type AreaSelectionMode = 'replace' | 'add';
 
@@ -35,4 +59,12 @@ export type SelectionProposalProvider = Readonly<{
     rect: EditorPageRect,
     mode: AreaSelectionMode,
   ) => Result<SelectionProposal>;
+}>;
+
+/** Synchronous Core proposal boundary consumed by the pure resize session. */
+export type ResizeProposalProvider = Readonly<{
+  resize: (
+    start: ResizeInteractionStart,
+    input: SelectionResizeProposalInput,
+  ) => Result<ResizeInteractionProposal>;
 }>;
