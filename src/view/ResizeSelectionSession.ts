@@ -48,6 +48,8 @@ export type ResizeSelectionSessionSnapshot = Readonly<{
   altKey: boolean;
   start: ResizePoint;
   current: ResizePoint;
+  anchor: ResizePoint | null;
+  bounds: ResizeBounds;
 }>;
 
 function guardedRead<T>(read: () => T, guard?: SnapshotGuard): T {
@@ -369,6 +371,7 @@ export class ResizeSelectionSession {
 
   /** Return a fresh deeply frozen diagnostic snapshot. */
   public snapshot(): ResizeSelectionSessionSnapshot {
+    const resize = this.latestProposal?.resize;
     return Object.freeze({
       phase: this.phase,
       terminalEffect: this.terminalEffect,
@@ -378,6 +381,8 @@ export class ResizeSelectionSession {
       altKey: this.currentSample.altKey,
       start: snapshotPoint(this.startPoint),
       current: snapshotPoint(this.currentSample.pagePoint),
+      anchor: resize === undefined ? null : snapshotPoint(resize.anchor),
+      bounds: snapshotBounds(resize?.bounds ?? this.start.bounds),
     });
   }
 

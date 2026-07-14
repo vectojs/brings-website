@@ -1,10 +1,20 @@
 import { expect, test } from 'bun:test';
-import type { EditorSnapshot, NodeId, PageId, Result } from '@vectojs/brings-core';
+import type {
+  EditorSnapshot,
+  Matrix,
+  NodeId,
+  PageId,
+  ResizeHandlePosition,
+  Result,
+  SelectionResizeProposalInput,
+} from '@vectojs/brings-core';
 import { type IRenderer, VectoJSEvent } from '@vectojs/core';
 import type { EditorPagePoint, EditorPageRect } from '../src/editor/selectionCoordinates';
 import type {
   AreaSelectionMode,
   PointSelectionMode,
+  ResizeInteractionProposal,
+  ResizeInteractionStart,
   SelectionInteractionStart,
   SelectionProposal,
 } from '../src/editor/selectionInteraction';
@@ -14,6 +24,17 @@ const documentId = '00000000-0000-4000-8000-000000000001';
 const pageId = '00000000-0000-4000-8000-000000000002' as PageId;
 const first = '11111111-1111-4111-8111-111111111111' as NodeId;
 const second = '22222222-2222-4222-8222-222222222222' as NodeId;
+
+const resizeHandles = Object.freeze([
+  { handle: 'north-west', point: { x: 100, y: 120 } },
+  { handle: 'north', point: { x: 150, y: 120 } },
+  { handle: 'north-east', point: { x: 200, y: 120 } },
+  { handle: 'east', point: { x: 200, y: 160 } },
+  { handle: 'south-east', point: { x: 200, y: 200 } },
+  { handle: 'south', point: { x: 150, y: 200 } },
+  { handle: 'south-west', point: { x: 100, y: 200 } },
+  { handle: 'west', point: { x: 100, y: 160 } },
+] satisfies readonly ResizeHandlePosition[]);
 
 function childById(shell: EditorShell, id: string) {
   const find = (
@@ -96,6 +117,96 @@ function proposal(start: SelectionInteractionStart, nodeIds: readonly NodeId[]):
       activeNodeId: start.selection.activeNodeId,
     },
     selection: { nodeIds: [...nodeIds], activeNodeId: nodeIds.at(-1) ?? null },
+  };
+}
+
+function resizeStart(
+  handles: readonly ResizeHandlePosition[] = resizeHandles,
+): ResizeInteractionStart {
+  return Object.freeze({
+    token: Object.freeze({ documentRevision: 4, selectionGeneration: 1 }),
+    selection: Object.freeze({ nodeIds: Object.freeze([first]), activeNodeId: first }),
+    bounds: Object.freeze({ minX: 100, minY: 120, maxX: 200, maxY: 200 }),
+    handles: Object.freeze(
+      handles.map((entry) =>
+        Object.freeze({
+          handle: entry.handle,
+          point: Object.freeze({ x: entry.point.x, y: entry.point.y }),
+        }),
+      ),
+    ),
+  });
+}
+
+function resizeProposal(
+  start: ResizeInteractionStart,
+  input: SelectionResizeProposalInput,
+  delta: Matrix = Object.freeze([2, 0, 0, 3, -100, -240]),
+): ResizeInteractionProposal {
+  return Object.freeze({
+    token: start.token,
+    selection: start.selection,
+    input: Object.freeze({
+      handle: input.handle,
+      startPoint: Object.freeze({ ...input.startPoint }),
+      currentPoint: Object.freeze({ ...input.currentPoint }),
+      preserveAspectRatio: input.preserveAspectRatio,
+      fromCenter: input.fromCenter,
+    }),
+    resize: Object.freeze({
+      handle: input.handle,
+      anchor: Object.freeze({ x: 100, y: 120 }),
+      scaleX: delta[0],
+      scaleY: delta[3],
+      bounds: Object.freeze({ minX: 100, minY: 120, maxX: 300, maxY: 360 }),
+      command: Object.freeze({
+        kind: 'apply-transform-delta',
+        nodeIds: start.selection.nodeIds,
+        delta,
+      }),
+    }),
+  });
+}
+
+function resizePorts(
+  input: Readonly<{
+    start?: ResizeInteractionStart;
+    delta?: Matrix;
+    snapshot?: () => EditorSnapshot;
+  }> = {},
+) {
+  const start = input.start ?? resizeStart();
+  const proposals: ResizeInteractionProposal[] = [];
+  const samples: SelectionResizeProposalInput[] = [];
+  const commits: ResizeInteractionProposal[] = [];
+  let beginCalls = 0;
+  return {
+    start,
+    proposals,
+    samples,
+    commits,
+    get beginCalls() {
+      return beginCalls;
+    },
+    ports: {
+      documentSnapshot: input.snapshot ?? (() => editorSnapshot([first])),
+      beginResizeInteraction: () => {
+        beginCalls += 1;
+        return { ok: true as const, value: start };
+      },
+      proposeResize(
+        value: Readonly<{ start: ResizeInteractionStart; input: SelectionResizeProposalInput }>,
+      ) {
+        samples.push(value.input);
+        const proposed = resizeProposal(value.start, value.input, input.delta);
+        proposals.push(proposed);
+        return { ok: true as const, value: proposed };
+      },
+      commitResize(value: ResizeInteractionProposal): Result<EditorSnapshot> {
+        commits.push(value);
+        return { ok: true, value: editorSnapshot([first]) };
+      },
+    },
   };
 }
 
@@ -1184,4 +1295,446 @@ test('reports unsupported and overflowing transform branches once', () => {
     code: 'render.transform-overflow',
     path: '/nodes/1/transform',
   });
+});
+
+test('draws Core aggregate bounds and eight 8px handles in frozen Core order', () => {
+  const state = resizePorts();
+  const shell = new EditorShell(1440, 900, state.ports);
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  const handleRects = recording.paintedRects.filter(
+    ({ args }) => args[2] === 8 && args[3] === 8 && args[4] === 0,
+  );
+  expect(handleRects.map(({ args }) => [Number(args[0]) + 4, Number(args[1]) + 4])).toEqual(
+    resizeHandles.map(({ point }) => [point.x, point.y]),
+  );
+  expect(handleRects.every(({ matrix }) => JSON.stringify(matrix) === '[1,0,0,1,240,56]')).toBe(
+    true,
+  );
+
+  const outlineIndex = recording.calls.findIndex(
+    ({ method, args }) =>
+      method === 'roundRect' && JSON.stringify(args.slice(0, 4)) === '[-2,-2,104,84]',
+  );
+  const aggregateIndex = recording.calls.findIndex(
+    ({ method, args }) =>
+      method === 'roundRect' && JSON.stringify(args.slice(0, 5)) === '[100,120,100,80,0]',
+  );
+  const firstHandleIndex = recording.calls.findIndex(
+    ({ method, args }) =>
+      method === 'roundRect' && JSON.stringify(args.slice(0, 5)) === '[96,116,8,8,0]',
+  );
+  expect(aggregateIndex).toBeGreaterThan(outlineIndex);
+  expect(firstHandleIndex).toBeGreaterThan(aggregateIndex);
+  expect(recording.calls.filter(({ method }) => method === 'save')).toHaveLength(
+    recording.calls.filter(({ method }) => method === 'restore').length,
+  );
+});
+
+test('uses inclusive 20px handle hit regions, nearest-center arbitration, and Core tie order', () => {
+  for (const [index, entry] of resizeHandles.entries()) {
+    const state = resizePorts();
+    const shell = new EditorShell(1440, 900, state.ports);
+    const offset = index % 2 === 0 ? -10 : 10;
+    dispatchPointer(shell, 'pointerdown', {
+      pointerId: 800 + index,
+      x: entry.point.x + offset,
+      y: entry.point.y - offset,
+    });
+    expect(shell.interactionSnapshot()).toMatchObject({
+      phase: 'resizing',
+      handle: entry.handle,
+    });
+  }
+
+  const overlap = resizeStart(
+    resizeHandles.map((entry) =>
+      entry.handle === 'north-west' || entry.handle === 'north'
+        ? { handle: entry.handle, point: { x: 100, y: 120 } }
+        : entry,
+    ),
+  );
+  const tied = resizePorts({ start: overlap });
+  const tiedShell = new EditorShell(1440, 900, tied.ports);
+  dispatchPointer(tiedShell, 'pointerdown', { pointerId: 81, x: 100, y: 120, altKey: true });
+  expect(tiedShell.interactionSnapshot()).toMatchObject({
+    phase: 'resizing',
+    pointerId: 81,
+    handle: 'north-west',
+    altKey: true,
+  });
+
+  const edge = resizePorts();
+  const edgeShell = new EditorShell(1440, 900, edge.ports);
+  dispatchPointer(edgeShell, 'pointerdown', { pointerId: 82, x: 90, y: 110 });
+  expect(edgeShell.interactionSnapshot()).toMatchObject({
+    phase: 'resizing',
+    handle: 'north-west',
+  });
+
+  const selection = selectionPorts();
+  let resizeBegins = 0;
+  const missShell = new EditorShell(1440, 900, {
+    ...selection.ports,
+    beginResizeInteraction: () => {
+      resizeBegins += 1;
+      return { ok: true, value: resizeStart() };
+    },
+  });
+  dispatchPointer(missShell, 'pointerdown', { pointerId: 83, x: 89.9, y: 109.9 });
+  dispatchPointer(missShell, 'pointerup', { pointerId: 83, x: 89.9, y: 109.9 });
+  expect(resizeBegins).toBe(1);
+  expect(selection.pointCalls).toHaveLength(1);
+  expect(selection.commits).toHaveLength(1);
+});
+
+test('prioritizes an Alt resize hit while preserving unsupported Alt behavior on a miss', () => {
+  const hit = resizePorts();
+  const hitShell = new EditorShell(1440, 900, hit.ports);
+  dispatchPointer(hitShell, 'pointerdown', {
+    pointerId: 84,
+    x: 200,
+    y: 200,
+    altKey: true,
+  });
+  dispatchPointer(hitShell, 'pointermove', {
+    pointerId: 84,
+    x: 240,
+    y: 230,
+    altKey: true,
+  });
+  expect(hit.samples).toHaveLength(1);
+  expect(hit.samples[0]).toMatchObject({ handle: 'south-east', fromCenter: true });
+
+  const miss = selectionPorts();
+  const missShell = new EditorShell(1440, 900, {
+    ...miss.ports,
+    beginResizeInteraction: () => ({ ok: true, value: resizeStart() }),
+  });
+  dispatchPointer(missShell, 'pointerdown', {
+    pointerId: 85,
+    x: 40,
+    y: 40,
+    altKey: true,
+  });
+  dispatchPointer(missShell, 'pointerup', {
+    pointerId: 85,
+    x: 40,
+    y: 40,
+    altKey: true,
+  });
+  expect(miss.pointCalls).toEqual([]);
+  expect(miss.commits).toEqual([]);
+});
+
+test('routes only the resize owner and samples Shift and Alt dynamically through one commit', () => {
+  const state = resizePorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 86, x: 200, y: 200 });
+
+  const canvas = childById(shell, 'brings-canvas-region');
+  let foreignReads = 0;
+  canvas.dispatchEvent(
+    new VectoJSEvent(
+      'pointermove',
+      canvas,
+      {
+        pointerId: 999,
+        get button() {
+          foreignReads += 1;
+          throw new Error('foreign button must stay unread');
+        },
+        get shiftKey() {
+          foreignReads += 1;
+          throw new Error('foreign shift must stay unread');
+        },
+      },
+      true,
+      { x: canvas.x + 220, y: canvas.y + 220 },
+    ),
+  );
+  dispatchPointer(shell, 'pointermove', {
+    pointerId: 86,
+    x: 230,
+    y: 220,
+    shiftKey: true,
+  });
+  dispatchPointer(shell, 'pointerup', {
+    pointerId: 86,
+    x: 240,
+    y: 230,
+    altKey: true,
+  });
+
+  expect(foreignReads).toBe(0);
+  expect(errors).toEqual([]);
+  expect(
+    state.samples.map(({ preserveAspectRatio, fromCenter }) => [preserveAspectRatio, fromCenter]),
+  ).toEqual([
+    [true, false],
+    [false, true],
+  ]);
+  expect(state.commits).toHaveLength(1);
+  dispatchPointer(shell, 'pointerup', { pointerId: 86, x: 250, y: 240 });
+  expect(state.commits).toHaveLength(1);
+});
+
+test('discards resize on pointercancel, Escape, and a narrow transition with late-event quarantine', () => {
+  const pointerCancelled = resizePorts();
+  const pointerShell = new EditorShell(1440, 900, pointerCancelled.ports);
+  dispatchPointer(pointerShell, 'pointerdown', { pointerId: 87, x: 200, y: 200 });
+  dispatchPointer(pointerShell, 'pointermove', { pointerId: 87, x: 220, y: 220 });
+  dispatchPointer(pointerShell, 'pointercancel', { pointerId: 87, x: 220, y: 220 });
+  expect(pointerShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    handle: 'south-east',
+  });
+  expect(pointerCancelled.commits).toEqual([]);
+
+  const escaped = resizePorts();
+  const escapeShell = new EditorShell(1440, 900, escaped.ports);
+  dispatchPointer(escapeShell, 'pointerdown', { pointerId: 88, x: 200, y: 200 });
+  const canvas = childById(escapeShell, 'brings-canvas-region');
+  const escape = new VectoJSEvent('keydown', canvas, { key: 'Escape' });
+  canvas.dispatchEvent(escape);
+  expect(escape.propagationStopped).toBe(true);
+  expect(escapeShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+  });
+
+  const narrowed = resizePorts();
+  const narrowShell = new EditorShell(700, 600, narrowed.ports);
+  dispatchPointer(narrowShell, 'pointerdown', { pointerId: 89, x: 200, y: 200 });
+  dispatchPointer(narrowShell, 'pointermove', { pointerId: 89, x: 240, y: 230 });
+  narrowShell.resize(390, 600);
+  expect(narrowShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+  });
+  dispatchPointer(narrowShell, 'pointerup', { pointerId: 89, x: 240, y: 230 });
+  expect(narrowed.commits).toEqual([]);
+  const recording = recordingRenderer();
+  narrowShell.render(recording.renderer);
+  expect(recording.paintedRects.some(({ args }) => args[2] === 8 && args[3] === 8)).toBe(false);
+});
+
+test('contains malformed owner samples and re-entrant begin/propose ports without stale effects', () => {
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const state = resizePorts();
+  let shell!: EditorShell;
+  let reenteredBegin = false;
+  shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    beginResizeInteraction: () => {
+      if (!reenteredBegin) {
+        reenteredBegin = true;
+        dispatchPointer(shell, 'pointerdown', { pointerId: 91, x: 200, y: 200 });
+      }
+      return { ok: true, value: state.start };
+    },
+    reportInteractionError: (error) => errors.push(error),
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 90, x: 200, y: 200 });
+  expect(shell.interactionSnapshot()).toMatchObject({ phase: 'resizing', pointerId: 91 });
+
+  const canvas = childById(shell, 'brings-canvas-region');
+  const malformed = new VectoJSEvent(
+    'pointermove',
+    canvas,
+    {
+      pointerId: 91,
+      button: 0,
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      get metaKey() {
+        throw new Error('lost native state');
+      },
+    },
+    true,
+    { x: canvas.x + 230, y: canvas.y + 230 },
+  );
+  expect(() => canvas.dispatchEvent(malformed)).not.toThrow();
+  expect(errors).toEqual([{ code: 'interaction.pointer-invalid', path: '/nativeEvent/metaKey' }]);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+  });
+
+  const proposalState = resizePorts();
+  let proposalShell!: EditorShell;
+  proposalShell = new EditorShell(1440, 900, {
+    ...proposalState.ports,
+    proposeResize: (value) => {
+      const proposalCanvas = childById(proposalShell, 'brings-canvas-region');
+      proposalCanvas.dispatchEvent(new VectoJSEvent('keydown', proposalCanvas, { key: 'Escape' }));
+      return { ok: true, value: resizeProposal(value.start, value.input) };
+    },
+  });
+  dispatchPointer(proposalShell, 'pointerdown', { pointerId: 92, x: 200, y: 200 });
+  dispatchPointer(proposalShell, 'pointermove', { pointerId: 92, x: 230, y: 230 });
+  expect(proposalShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+  });
+  expect(proposalState.commits).toEqual([]);
+});
+
+test('does not let a re-entrant resize commit overwrite a newly routed owner', () => {
+  const state = resizePorts();
+  let shell!: EditorShell;
+  shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    commitResize: (proposal) => {
+      state.commits.push(proposal);
+      dispatchPointer(shell, 'pointerdown', { pointerId: 98, x: 200, y: 200 });
+      return { ok: true, value: editorSnapshot([first]) };
+    },
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 97, x: 200, y: 200 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 97, x: 240, y: 230 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 97, x: 240, y: 230 });
+
+  expect(state.commits).toHaveLength(1);
+  expect(shell.interactionSnapshot()).toMatchObject({ phase: 'resizing', pointerId: 98 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 97, x: 250, y: 240 });
+  expect(shell.interactionSnapshot()).toMatchObject({ phase: 'resizing', pointerId: 98 });
+});
+
+test('renders a page-space resize delta once at the normalized selected root and descendants', () => {
+  const state = resizePorts();
+  const shell = new EditorShell(1440, 900, state.ports);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 93, x: 200, y: 200 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 93, x: 240, y: 230 });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 3, 340, 176],
+    args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 3, 360, 212],
+    args: [0, 0, 20, 16, [0, 0, 0, 0]],
+  });
+  expect(recording.calls.filter(({ method }) => method === 'save')).toHaveLength(
+    recording.calls.filter(({ method }) => method === 'restore').length,
+  );
+});
+
+test('preserves negative resize scales and matches the exact post-commit visual matrix', () => {
+  const negative = Object.freeze([-1, 0, 0, -1, 300, 320]) as Matrix;
+  let committed = false;
+  const before = editorSnapshot([first]);
+  const after: EditorSnapshot = {
+    ...before,
+    document: {
+      ...before.document,
+      revision: 5,
+      nodes: before.document.nodes.map((node) =>
+        node.id === first ? { ...node, transform: [-1, 0, 0, -1, 200, 200] } : node,
+      ),
+    },
+  };
+  const state = resizePorts({ delta: negative, snapshot: () => (committed ? after : before) });
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    commitResize: (proposal) => {
+      state.commits.push(proposal);
+      committed = true;
+      return { ok: true, value: after };
+    },
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 94, x: 200, y: 200 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 94, x: 80, y: 80 });
+  const preview = recordingRenderer();
+  shell.render(preview.renderer);
+  const previewRoot = preview.paintedRects.find(({ args }) => args[2] === 100 && args[3] === 80);
+  expect(previewRoot?.matrix).toEqual([-1, 0, 0, -1, 440, 256]);
+
+  dispatchPointer(shell, 'pointerup', { pointerId: 94, x: 80, y: 80 });
+  const durable = recordingRenderer();
+  shell.render(durable.renderer);
+  const durableRoot = durable.paintedRects.find(({ args }) => args[2] === 100 && args[3] === 80);
+  expect(durableRoot?.matrix).toEqual(previewRoot?.matrix);
+  expect(state.commits).toHaveLength(1);
+});
+
+test('suppresses unsupported resize shear and composed overflow with stable deduplicated errors', () => {
+  const cases = [
+    {
+      delta: Object.freeze([1, 0.25, 0, 1, 0, 0]) as Matrix,
+      code: 'render.transform-unsupported',
+    },
+    {
+      delta: Object.freeze([Number.MAX_VALUE, 0, 0, Number.MAX_VALUE, 0, 0]) as Matrix,
+      code: 'render.transform-overflow',
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const errors: Array<Readonly<{ code: string; path: string }>> = [];
+    const state = resizePorts({ delta: fixture.delta });
+    const shell = new EditorShell(1440, 900, {
+      ...state.ports,
+      reportInteractionError: (error) => errors.push(error),
+    });
+    dispatchPointer(shell, 'pointerdown', { pointerId: 95, x: 200, y: 200 });
+    dispatchPointer(shell, 'pointermove', { pointerId: 95, x: 240, y: 230 });
+    const firstRender = recordingRenderer();
+    shell.render(firstRender.renderer);
+    shell.render(recordingRenderer().renderer);
+
+    expect(errors).toEqual([{ code: fixture.code, path: '/nodes/0/transform' }]);
+    expect(firstRender.paintedRects.some(({ args }) => args[2] === 100 && args[3] === 80)).toBe(
+      false,
+    );
+    expect(firstRender.calls.filter(({ method }) => method === 'save')).toHaveLength(
+      firstRender.calls.filter(({ method }) => method === 'restore').length,
+    );
+  }
+});
+
+test('exposes fresh detached frozen resizing diagnostics with modifiers and Core geometry', () => {
+  const state = resizePorts();
+  const shell = new EditorShell(1440, 900, state.ports);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 96, x: 200, y: 200, altKey: true });
+  dispatchPointer(shell, 'pointermove', {
+    pointerId: 96,
+    x: 240,
+    y: 230,
+    shiftKey: true,
+    altKey: false,
+  });
+
+  const snapshot = shell.interactionSnapshot();
+  const again = shell.interactionSnapshot();
+  expect(snapshot).toMatchObject({
+    phase: 'resizing',
+    terminalEffect: null,
+    pointerId: 96,
+    handle: 'south-east',
+    shiftKey: true,
+    altKey: false,
+    start: null,
+    current: null,
+    resizeStart: { x: 200, y: 200 },
+    resizeCurrent: { x: 240, y: 230 },
+    anchor: { x: 100, y: 120 },
+    bounds: { minX: 100, minY: 120, maxX: 300, maxY: 360 },
+  });
+  expect(snapshot).not.toBe(again);
+  expect(Object.isFrozen(snapshot)).toBe(true);
+  expect(Object.isFrozen('bounds' in snapshot ? snapshot.bounds : null)).toBe(true);
+  expect(Object.isFrozen('anchor' in snapshot ? snapshot.anchor : null)).toBe(true);
+  expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
 });
