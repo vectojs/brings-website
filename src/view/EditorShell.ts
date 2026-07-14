@@ -30,27 +30,23 @@ export type DrawerSide = 'left' | 'right';
 
 const IDENTITY_MATRIX: Matrix = Object.freeze([1, 0, 0, 1, 0, 0]);
 
-function multiplyMatrices(left: Matrix, right: Matrix): Matrix {
-  return Object.freeze([
+function multiplyMatrices(left: Matrix, right: Matrix): Matrix | null {
+  const product = [
     left[0] * right[0] + left[2] * right[1],
     left[1] * right[0] + left[3] * right[1],
     left[0] * right[2] + left[2] * right[3],
     left[1] * right[2] + left[3] * right[3],
     left[0] * right[4] + left[2] * right[5] + left[4],
     left[1] * right[4] + left[3] * right[5] + left[5],
-  ]) as Matrix;
+  ];
+  return product.every(Number.isFinite) ? (Object.freeze(product) as Matrix) : null;
 }
 
-function translatedPageMatrix(matrix: Matrix, delta: PageDelta | null | undefined): Matrix {
-  if (delta == null) return matrix;
-  return Object.freeze([
-    matrix[0],
-    matrix[1],
-    matrix[2],
-    matrix[3],
-    matrix[4] + delta.x,
-    matrix[5] + delta.y,
-  ]) as Matrix;
+function moveDeltaInParentSpace(parent: Matrix, delta: PageDelta): PageDelta | null {
+  if (parent[1] !== 0 || parent[2] !== 0 || parent[0] === 0 || parent[3] === 0) return null;
+  const x = delta.x / parent[0];
+  const y = delta.y / parent[3];
+  return Number.isFinite(x) && Number.isFinite(y) ? (Object.freeze({ x, y }) as PageDelta) : null;
 }
 
 function applyAxisAlignedMatrix(renderer: IRenderer, matrix: Matrix): boolean {
@@ -476,6 +472,7 @@ export class EditorShell extends Entity {
   private terminalInteraction: SelectionGestureSessionSnapshot | null = null;
   private pointerRouteVersion = 0;
   private readonly quarantinedPointerIds = new Set<number>();
+  private readonly reportedRenderErrors = new Set<string>();
   private layout: EditorLayout;
   private readonly ports: ResolvedEditorShellPorts;
   private readonly selectionProvider: SelectionProposalProvider;
@@ -660,37 +657,90 @@ export class EditorShell extends Entity {
     const selected = new Set((visual?.selection ?? snapshot.selection).nodeIds);
     const movementDelta = visual?.movementDelta;
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
-    const renderNode = (node: SceneNode, parentMatrix: Matrix, ancestorMoved: boolean): void => {
+    const nodeIndexes = new Map(document.nodes.map((node, index) => [node.id, index]));
+    const renderNode = (
+      node: SceneNode,
+      parentMatrix: Matrix,
+      parentOpacity: number,
+      ancestorMoved: boolean,
+    ): void => {
       if (!node.visible) return;
-      const movesBranch = selected.has(node.id) && !ancestorMoved && movementDelta != null;
-      const pageMatrix = translatedPageMatrix(
-        multiplyMatrices(parentMatrix, node.transform),
-        movesBranch ? movementDelta : null,
-      );
-      if (node.type === 'frame' || node.type === 'rectangle') {
-        renderer.save();
-        if (applyAxisAlignedMatrix(renderer, pageMatrix)) {
-          renderer.setGlobalAlpha(node.opacity);
-          renderer.beginPath();
-          renderer.roundRect(0, 0, node.width, node.height, [...node.cornerRadii]);
-          const fill = node.type === 'frame' ? node.background : node.fill;
-          if (fill !== null) renderer.fill(this.paint(fill));
-          if (node.stroke !== null)
-            renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
-          if (selected.has(node.id)) {
-            renderer.beginPath();
-            renderer.roundRect(-2, -2, node.width + 4, node.height + 4, [...node.cornerRadii]);
-            renderer.stroke('#2563eb', 2);
-          }
-        }
-        renderer.restore();
+      const nodeIndex = nodeIndexes.get(node.id);
+      if (nodeIndex === undefined) return;
+      const transformPath = `/nodes/${nodeIndex}/transform`;
+      if (node.transform[1] !== 0 || node.transform[2] !== 0) {
+        this.reportRenderErrorOnce({
+          code: 'render.transform-unsupported',
+          path: transformPath,
+        });
+        return;
       }
+      const movesBranch = selected.has(node.id) && !ancestorMoved && movementDelta != null;
+      let localMatrix = node.transform;
+      if (movesBranch) {
+        const localDelta = moveDeltaInParentSpace(parentMatrix, movementDelta);
+        if (localDelta === null) {
+          this.reportRenderErrorOnce({
+            code: 'render.transform-unsupported',
+            path: transformPath,
+          });
+          return;
+        }
+        localMatrix = Object.freeze([
+          localMatrix[0],
+          localMatrix[1],
+          localMatrix[2],
+          localMatrix[3],
+          localMatrix[4] + localDelta.x,
+          localMatrix[5] + localDelta.y,
+        ]) as Matrix;
+      }
+      const pageMatrix = multiplyMatrices(parentMatrix, localMatrix);
+      if (pageMatrix === null) {
+        this.reportRenderErrorOnce({ code: 'render.transform-overflow', path: transformPath });
+        return;
+      }
+      const opacity = parentOpacity * node.opacity;
+      if (!Number.isFinite(opacity)) {
+        this.reportRenderErrorOnce({
+          code: 'render.opacity-overflow',
+          path: `/nodes/${nodeIndex}/opacity`,
+        });
+        return;
+      }
+      renderer.save();
+      if (!applyAxisAlignedMatrix(renderer, localMatrix)) {
+        renderer.restore();
+        this.reportRenderErrorOnce({
+          code: 'render.transform-unsupported',
+          path: transformPath,
+        });
+        return;
+      }
+      if (node.type === 'frame' || node.type === 'rectangle') {
+        renderer.setGlobalAlpha(opacity);
+        renderer.beginPath();
+        renderer.roundRect(0, 0, node.width, node.height, [...node.cornerRadii]);
+        const fill = node.type === 'frame' ? node.background : node.fill;
+        if (fill !== null) renderer.fill(this.paint(fill));
+        if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+        if (selected.has(node.id)) {
+          renderer.setGlobalAlpha(1);
+          renderer.beginPath();
+          renderer.roundRect(-2, -2, node.width + 4, node.height + 4, [...node.cornerRadii]);
+          renderer.stroke('#2563eb', 2);
+        }
+      }
+      if (node.type === 'frame' && node.clipChildren) renderer.clip(0, 0, node.width, node.height);
       if (node.type === 'frame' || node.type === 'group') {
         for (const childId of node.childIds) {
           const child = nodes.get(childId);
-          if (child !== undefined) renderNode(child, pageMatrix, ancestorMoved || movesBranch);
+          if (child !== undefined) {
+            renderNode(child, pageMatrix, opacity, ancestorMoved || movesBranch);
+          }
         }
       }
+      renderer.restore();
     };
     const activePage = document.pages.find((page) => page.id === document.activePageId);
     if (activePage === undefined) return;
@@ -698,7 +748,7 @@ export class EditorShell extends Entity {
     renderer.translate(originX, originY);
     for (const rootId of activePage.rootNodeIds) {
       const root = nodes.get(rootId);
-      if (root !== undefined) renderNode(root, IDENTITY_MATRIX, false);
+      if (root !== undefined) renderNode(root, IDENTITY_MATRIX, 1, false);
     }
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
       const source = visual.marquee;
@@ -965,6 +1015,13 @@ export class EditorShell extends Entity {
 
   private rejectPointer(pointerId: number, error: BringsError): void {
     this.quarantinedPointerIds.add(pointerId);
+    this.ports.reportInteractionError(error);
+  }
+
+  private reportRenderErrorOnce(error: BringsError): void {
+    const key = `${error.code}:${error.path}`;
+    if (this.reportedRenderErrors.has(key)) return;
+    this.reportedRenderErrors.add(key);
     this.ports.reportInteractionError(error);
   }
 

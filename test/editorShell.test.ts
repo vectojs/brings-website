@@ -135,19 +135,40 @@ function dispatchPointer(
 function recordingRenderer(): Readonly<{
   renderer: IRenderer;
   calls: Array<Readonly<{ method: string; args: readonly unknown[] }>>;
+  paintedRects: Array<Readonly<{ matrix: readonly number[]; args: readonly unknown[] }>>;
 }> {
   const calls: Array<Readonly<{ method: string; args: readonly unknown[] }>> = [];
+  const paintedRects: Array<Readonly<{ matrix: readonly number[]; args: readonly unknown[] }>> = [];
+  let matrix = [1, 0, 0, 1, 0, 0];
+  const stack: number[][] = [];
+  const multiply = (right: readonly number[]) => {
+    const left = matrix;
+    matrix = [
+      left[0]! * right[0]! + left[2]! * right[1]!,
+      left[1]! * right[0]! + left[3]! * right[1]!,
+      left[0]! * right[2]! + left[2]! * right[3]!,
+      left[1]! * right[2]! + left[3]! * right[3]!,
+      left[0]! * right[4]! + left[2]! * right[5]! + left[4]!,
+      left[1]! * right[4]! + left[3]! * right[5]! + left[5]!,
+    ];
+  };
   const renderer = new Proxy(
     {},
     {
       get(_target, property) {
         return (...args: readonly unknown[]) => {
-          calls.push({ method: String(property), args });
+          const method = String(property);
+          calls.push({ method, args });
+          if (method === 'save') stack.push([...matrix]);
+          if (method === 'restore') matrix = stack.pop() ?? matrix;
+          if (method === 'translate') multiply([1, 0, 0, 1, args[0] as number, args[1] as number]);
+          if (method === 'scale') multiply([args[0] as number, 0, 0, args[1] as number, 0, 0]);
+          if (method === 'roundRect') paintedRects.push({ matrix: [...matrix], args });
         };
       },
     },
   ) as IRenderer;
-  return { renderer, calls };
+  return { renderer, calls, paintedRects };
 }
 
 function selectionPorts(input: Readonly<{ ownerId?: NodeId | null }> = {}) {
@@ -960,11 +981,14 @@ test('renders preview movement once per selected branch and paints marquee after
   dispatchPointer(shell, 'pointermove', { pointerId: 15, x: 120, y: 150 });
   const movementRecording = recordingRenderer();
   shell.render(movementRecording.renderer);
-  const movementTranslations = movementRecording.calls
-    .filter((call) => call.method === 'translate')
-    .map((call) => call.args);
-  expect(movementTranslations).toContainEqual([120, 150]);
-  expect(movementTranslations).toContainEqual([130, 162]);
+  expect(movementRecording.paintedRects).toContainEqual({
+    matrix: [1, 0, 0, 1, 360, 206],
+    args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
+  expect(movementRecording.paintedRects).toContainEqual({
+    matrix: [1, 0, 0, 1, 370, 218],
+    args: [0, 0, 20, 16, [0, 0, 0, 0]],
+  });
   expect(movementRecording.calls.filter((call) => call.method === 'save')).toHaveLength(
     movementRecording.calls.filter((call) => call.method === 'restore').length,
   );
@@ -1020,8 +1044,144 @@ test('renders axis-aligned node scale instead of dropping durable affine terms',
 
   expect(recording.calls).toContainEqual({ method: 'translate', args: [100, 120] });
   expect(recording.calls).toContainEqual({ method: 'scale', args: [2, 1.5] });
-  expect(recording.calls).toContainEqual({
-    method: 'roundRect',
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 1.5, 340, 176],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
+});
+
+test('composes scaled descendants and keeps selected movement in page space', () => {
+  const snapshot = editorSnapshot([first]);
+  const scaled: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.id === first
+          ? { ...node, transform: [2, 0, 0, 1.5, 100, 120] }
+          : { ...node, transform: [3, 0, 0, 4, 10, 12] },
+      ),
+    },
+  };
+  const start = interactionStart([first]);
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => scaled,
+    beginSelectionInteraction: () => start,
+    proposePointSelection: () => ({
+      ok: true,
+      value: { ownerId: first, proposal: proposal(start, [first]) },
+    }),
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 71, x: 100, y: 120 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 71, x: 120, y: 150 });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 1.5, 360, 206],
+    args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [6, 0, 0, 6, 380, 224],
+    args: [0, 0, 20, 16, [0, 0, 0, 0]],
+  });
+});
+
+test('preserves signed axis scale for anchor-crossing previews', () => {
+  const snapshot = editorSnapshot([first]);
+  const mirrored: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.id === first ? { ...node, transform: [-2, 0, 0, -1.5, 100, 120] } : node,
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => mirrored });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [-2, 0, 0, -1.5, 340, 176],
+    args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
+});
+
+test('clips scaled frame descendants and composes container opacity', () => {
+  const snapshot = editorSnapshot();
+  const nested: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.id === first
+          ? {
+              ...node,
+              opacity: 0.5,
+              clipChildren: true,
+              transform: [2, 0, 0, 2, 100, 120],
+            }
+          : { ...node, opacity: 0.5 },
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => nested });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.calls).toContainEqual({ method: 'clip', args: [0, 0, 100, 80] });
+  expect(
+    recording.calls.filter((call) => call.method === 'setGlobalAlpha').map((call) => call.args),
+  ).toEqual(expect.arrayContaining([[0.5], [0.25]]));
+});
+
+test('reports unsupported and overflowing transform branches once', () => {
+  const snapshot = editorSnapshot();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const unsupported: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.id === first ? { ...node, transform: [1, 0.25, 0, 1, 100, 120] } : node,
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => unsupported,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  const firstRender = recordingRenderer();
+
+  shell.render(firstRender.renderer);
+  shell.render(recordingRenderer().renderer);
+
+  expect(errors).toEqual([{ code: 'render.transform-unsupported', path: '/nodes/0/transform' }]);
+  expect(firstRender.paintedRects.some((entry) => entry.args[2] === 100)).toBe(false);
+
+  const overflowing: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.id === first
+          ? { ...node, transform: [Number.MAX_VALUE, 0, 0, Number.MAX_VALUE, 100, 120] }
+          : { ...node, transform: [Number.MAX_VALUE, 0, 0, Number.MAX_VALUE, 10, 12] },
+      ),
+    },
+  };
+  const overflowErrors: Array<Readonly<{ code: string; path: string }>> = [];
+  const overflowShell = new EditorShell(1440, 900, {
+    documentSnapshot: () => overflowing,
+    reportInteractionError: (error) => overflowErrors.push(error),
+  });
+  overflowShell.render(recordingRenderer().renderer);
+  expect(overflowErrors).toContainEqual({
+    code: 'render.transform-overflow',
+    path: '/nodes/1/transform',
   });
 });
