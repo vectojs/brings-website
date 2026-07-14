@@ -5,7 +5,7 @@ import {
   type IRenderer,
   type VectoJSEvent,
 } from '@vectojs/core';
-import type { BringsError, EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
+import type { BringsError, EditorSnapshot, Matrix, Result, SceneNode } from '@vectojs/brings-core';
 import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
 import type {
   SelectionInteractionStart,
@@ -27,6 +27,38 @@ import {
 import { SelectionGestureInterpreter } from './SelectionGestureInterpreter';
 
 export type DrawerSide = 'left' | 'right';
+
+const IDENTITY_MATRIX: Matrix = Object.freeze([1, 0, 0, 1, 0, 0]);
+
+function multiplyMatrices(left: Matrix, right: Matrix): Matrix {
+  return Object.freeze([
+    left[0] * right[0] + left[2] * right[1],
+    left[1] * right[0] + left[3] * right[1],
+    left[0] * right[2] + left[2] * right[3],
+    left[1] * right[2] + left[3] * right[3],
+    left[0] * right[4] + left[2] * right[5] + left[4],
+    left[1] * right[4] + left[3] * right[5] + left[5],
+  ]) as Matrix;
+}
+
+function translatedPageMatrix(matrix: Matrix, delta: PageDelta | null | undefined): Matrix {
+  if (delta == null) return matrix;
+  return Object.freeze([
+    matrix[0],
+    matrix[1],
+    matrix[2],
+    matrix[3],
+    matrix[4] + delta.x,
+    matrix[5] + delta.y,
+  ]) as Matrix;
+}
+
+function applyAxisAlignedMatrix(renderer: IRenderer, matrix: Matrix): boolean {
+  if (matrix[1] !== 0 || matrix[2] !== 0) return false;
+  renderer.translate(matrix[4], matrix[5]);
+  renderer.scale(matrix[0], matrix[3]);
+  return true;
+}
 
 class EditorRegion extends Entity {
   private pointerHandler: ((event: VectoJSEvent) => void) | null = null;
@@ -628,35 +660,35 @@ export class EditorShell extends Entity {
     const selected = new Set((visual?.selection ?? snapshot.selection).nodeIds);
     const movementDelta = visual?.movementDelta;
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
-    const renderNode = (
-      node: SceneNode,
-      parentX: number,
-      parentY: number,
-      ancestorMoved: boolean,
-    ): void => {
+    const renderNode = (node: SceneNode, parentMatrix: Matrix, ancestorMoved: boolean): void => {
       if (!node.visible) return;
       const movesBranch = selected.has(node.id) && !ancestorMoved && movementDelta != null;
-      const x = parentX + node.transform[4] + (movesBranch ? (movementDelta?.x ?? 0) : 0);
-      const y = parentY + node.transform[5] + (movesBranch ? (movementDelta?.y ?? 0) : 0);
+      const pageMatrix = translatedPageMatrix(
+        multiplyMatrices(parentMatrix, node.transform),
+        movesBranch ? movementDelta : null,
+      );
       if (node.type === 'frame' || node.type === 'rectangle') {
         renderer.save();
-        renderer.setGlobalAlpha(node.opacity);
-        renderer.beginPath();
-        renderer.roundRect(x, y, node.width, node.height, [...node.cornerRadii]);
-        const fill = node.type === 'frame' ? node.background : node.fill;
-        if (fill !== null) renderer.fill(this.paint(fill));
-        if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
-        if (selected.has(node.id)) {
+        if (applyAxisAlignedMatrix(renderer, pageMatrix)) {
+          renderer.setGlobalAlpha(node.opacity);
           renderer.beginPath();
-          renderer.roundRect(x - 2, y - 2, node.width + 4, node.height + 4, [...node.cornerRadii]);
-          renderer.stroke('#2563eb', 2);
+          renderer.roundRect(0, 0, node.width, node.height, [...node.cornerRadii]);
+          const fill = node.type === 'frame' ? node.background : node.fill;
+          if (fill !== null) renderer.fill(this.paint(fill));
+          if (node.stroke !== null)
+            renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+          if (selected.has(node.id)) {
+            renderer.beginPath();
+            renderer.roundRect(-2, -2, node.width + 4, node.height + 4, [...node.cornerRadii]);
+            renderer.stroke('#2563eb', 2);
+          }
         }
         renderer.restore();
       }
       if (node.type === 'frame' || node.type === 'group') {
         for (const childId of node.childIds) {
           const child = nodes.get(childId);
-          if (child !== undefined) renderNode(child, x, y, ancestorMoved || movesBranch);
+          if (child !== undefined) renderNode(child, pageMatrix, ancestorMoved || movesBranch);
         }
       }
     };
@@ -666,7 +698,7 @@ export class EditorShell extends Entity {
     renderer.translate(originX, originY);
     for (const rootId of activePage.rootNodeIds) {
       const root = nodes.get(rootId);
-      if (root !== undefined) renderNode(root, 0, 0, false);
+      if (root !== undefined) renderNode(root, IDENTITY_MATRIX, false);
     }
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
       const source = visual.marquee;

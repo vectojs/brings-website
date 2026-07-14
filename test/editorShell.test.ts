@@ -960,11 +960,11 @@ test('renders preview movement once per selected branch and paints marquee after
   dispatchPointer(shell, 'pointermove', { pointerId: 15, x: 120, y: 150 });
   const movementRecording = recordingRenderer();
   shell.render(movementRecording.renderer);
-  const movementRects = movementRecording.calls
-    .filter((call) => call.method === 'roundRect')
-    .map((call) => call.args.slice(0, 4));
-  expect(movementRects).toContainEqual([120, 150, 100, 80]);
-  expect(movementRects).toContainEqual([130, 162, 20, 16]);
+  const movementTranslations = movementRecording.calls
+    .filter((call) => call.method === 'translate')
+    .map((call) => call.args);
+  expect(movementTranslations).toContainEqual([120, 150]);
+  expect(movementTranslations).toContainEqual([130, 162]);
   expect(movementRecording.calls.filter((call) => call.method === 'save')).toHaveLength(
     movementRecording.calls.filter((call) => call.method === 'restore').length,
   );
@@ -983,7 +983,7 @@ test('renders preview movement once per selected branch and paints marquee after
   const outlineIndex = marqueeRecording.calls.findIndex(
     (call) =>
       call.method === 'roundRect' &&
-      JSON.stringify(call.args.slice(0, 4)) === JSON.stringify([98, 118, 104, 84]),
+      JSON.stringify(call.args.slice(0, 4)) === JSON.stringify([-2, -2, 104, 84]),
   );
   const panelIndex = marqueeRecording.calls.findLastIndex(
     (call) => call.method === 'roundRect' && call.args[1] === 56,
@@ -1000,4 +1000,28 @@ test('renders preview movement once per selected branch and paints marquee after
     { method: 'stroke', args: ['#2563eb', 1] },
     { method: 'restore', args: [] },
   ]);
+});
+
+test('renders axis-aligned node scale instead of dropping durable affine terms', () => {
+  const snapshot = editorSnapshot([first]);
+  const scaled: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.id === first ? { ...node, transform: [2, 0, 0, 1.5, 100, 120] } : node,
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => scaled });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.calls).toContainEqual({ method: 'translate', args: [100, 120] });
+  expect(recording.calls).toContainEqual({ method: 'scale', args: [2, 1.5] });
+  expect(recording.calls).toContainEqual({
+    method: 'roundRect',
+    args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
 });
