@@ -143,7 +143,7 @@ function multiplyAffine(left: readonly number[], right: readonly number[]): read
 async function readResizeHandleLogicalGeometry(
   page: Page,
   point: Readonly<{ x: number; y: number }>,
-): Promise<number | null> {
+): Promise<Readonly<{ fillSpan: number; paintedSpan: number }> | null> {
   return page.locator('canvas').evaluate((element, { x, y }) => {
     if (!(element instanceof HTMLCanvasElement)) return null;
     const context = element.getContext('2d');
@@ -157,18 +157,24 @@ async function readResizeHandleLogicalGeometry(
         (channel) => Math.abs((pixel[channel] ?? 0) - (background[channel] ?? 0)) > 8,
       );
     };
-    const minimum = Math.round((x - 12) * dpr);
-    const maximum = Math.round((x + 12) * dpr);
-    const painted: number[] = [];
-    const filled: number[] = [];
-    for (let sampleX = minimum; sampleX <= maximum; sampleX += 1) {
-      if (differs(sampleX)) painted.push(sampleX);
+    const center = Math.round(x * dpr);
+    const filled = (sampleX: number): boolean => {
       const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
-      if ([0, 1, 2].every((channel) => (pixel[channel] ?? 0) > 250)) filled.push(sampleX);
-    }
-    const run = (samples: readonly number[]): number =>
-      samples.length === 0 ? 0 : ((samples.at(-1) ?? 0) - (samples[0] ?? 0) + 1) / dpr;
-    return (run(painted) + run(filled)) / 2;
+      return [0, 1, 2].every((channel) => (pixel[channel] ?? 0) > 250);
+    };
+    const centerSpan = (matches: (sampleX: number) => boolean): number => {
+      if (!matches(center)) return 0;
+      const limit = Math.round(12 * dpr);
+      let minimum = center;
+      let maximum = center;
+      while (center - minimum < limit && matches(minimum - 1)) minimum -= 1;
+      while (maximum - center < limit && matches(maximum + 1)) maximum += 1;
+      return (maximum - minimum + 1) / dpr;
+    };
+    return {
+      fillSpan: centerSpan(filled),
+      paintedSpan: centerSpan(differs),
+    };
   }, point);
 }
 
@@ -1030,15 +1036,14 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   await page.getByRole('button', { name: /Select/ }).click();
   await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
   await expect.poll(async () => (await readDebug(page)).snapshot.selection.nodeIds.length).toBe(1);
-  await expect
-    .poll(
-      async () =>
-        (await readResizeHandleLogicalGeometry(page, {
-          x: bounds.x + 500,
-          y: bounds.y + 423,
-        })) ?? 0,
-    )
-    .toBeCloseTo(8, 0);
+  const readHandleRaster = () =>
+    readResizeHandleLogicalGeometry(page, {
+      x: bounds.x + 500,
+      y: bounds.y + 423,
+    });
+  // A centered 1px stroke yields a 7px fill and 9px painted span around an 8px handle.
+  await expect.poll(async () => (await readHandleRaster())?.fillSpan ?? 0).toBeCloseTo(7, 0);
+  await expect.poll(async () => (await readHandleRaster())?.paintedSpan ?? 0).toBeCloseTo(9, 0);
 
   const resizeAt = async (offset: number): Promise<void> => {
     await page.mouse.move((bounds.x + 500 + offset) * pageScale, (bounds.y + 420) * pageScale);
@@ -1421,6 +1426,7 @@ test('discards resize on Escape, pointercancel, and a narrow responsive transiti
   expect(escaped.snapshot).toEqual(durable);
   const escapedPointerId = escaped.interaction.pointerId;
   if (escapedPointerId === null) throw new Error('The escaped resize has no pointer identifier.');
+  const traceBeforeQuarantinedDown = escaped.trace.length;
   await page.getByRole('region', { name: 'Design canvas' }).evaluate(
     (element, input) => {
       element.dispatchEvent(
@@ -1436,6 +1442,14 @@ test('discards resize on Escape, pointercancel, and a narrow responsive transiti
     },
     { x: southEast.x, y: southEast.y, pointerId: escapedPointerId },
   );
+  await expect
+    .poll(async () =>
+      (await readDebug(page)).trace
+        .slice(traceBeforeQuarantinedDown)
+        .filter((entry) => entry.type === 'pointerdown')
+        .map((entry) => ({ type: entry.type, targetId: entry.targetId })),
+    )
+    .toEqual([{ type: 'pointerdown', targetId: 'brings-canvas-region' }]);
   const afterLateDown = await readDebug(page);
   expect(afterLateDown.interaction).toEqual(escaped.interaction);
   expect(afterLateDown.snapshot).toEqual(durable);
