@@ -19,8 +19,8 @@ transform command on `pointerup`, and roll back without history on
 Ctrl/Cmd+Shift+Z, and Ctrl+Y to transactional Core undo/redo. Delete and
 Backspace atomically delete the normalized selection as one Core command, with
 selection restoration on undo and native-editor yielding for every shortcut.
-The app consumes exact published `@vectojs/brings-core@0.7.0`,
-`@vectojs/core@1.6.2`, `@vectojs/ui@1.7.2`, and
+The app consumes exact published `@vectojs/brings-core@0.8.0`,
+`@vectojs/core@1.8.0`, `@vectojs/ui@1.9.0`, and
 `@vectojs/devtools@0.4.2` registry dependencies, never local workspace links.
 Interaction slices render and mutate only Core-owned state.
 
@@ -35,6 +35,12 @@ just verify
 
 The canonical application URL is `https://brings-website.vectojs.org/`.
 `pages.dev` remains a deployment fallback.
+
+The Cloudflare Pages project is named `brings`; its stable Pages fallback is
+`https://brings-website.pages.dev/`. The repository name and canonical domain
+do not determine the Pages API project identifier. Domain reconciliation passes
+both values explicitly because a renamed Pages project can retain its original
+`pages.dev` hostname.
 
 `just deploy` creates a Pages preview for the current checked-out branch. Only
 the protected `main` branch may use `just deploy-production`; CI performs that

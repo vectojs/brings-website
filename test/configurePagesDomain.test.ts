@@ -28,8 +28,9 @@ function harness(responses: readonly Response[]): {
     options: {
       accountId: 'account-1',
       apiToken: 'token-1',
-      projectName: 'brings-website',
+      projectName: 'brings',
       domainName: 'brings-website.vectojs.org',
+      pagesHostname: 'brings-website.pages.dev',
       fetch: async (input, init) => {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
         calls.push({
@@ -128,7 +129,7 @@ test('associates the Pages domain before creating its DNS record', async () => {
   await configurePagesDomain(options);
   expect(calls.map(({ method }) => method)).toEqual(['GET', 'POST', 'GET', 'POST', 'PATCH']);
   expect(calls[1]).toMatchObject({
-    url: 'https://api.cloudflare.com/client/v4/accounts/account-1/pages/projects/brings-website/domains',
+    url: 'https://api.cloudflare.com/client/v4/accounts/account-1/pages/projects/brings/domains',
     method: 'POST',
     body: { name: optionsDomain },
   });
