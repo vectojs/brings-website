@@ -779,6 +779,109 @@ test('snapshots native pointer getters once before beginning a session', () => {
   dispatchPointer(shell, 'pointercancel', { pointerId: 21, x: 10, y: 20 });
 });
 
+test('contains a native pointer getter throw and quarantines a known id until raw terminal', () => {
+  const state = selectionPorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  const canvas = childById(shell, 'brings-canvas-region');
+  const invalid = new VectoJSEvent(
+    'pointerdown',
+    canvas,
+    {
+      pointerId: 61,
+      get button() {
+        throw new Error('hostile native getter');
+      },
+    },
+    true,
+    { x: canvas.x + 10, y: canvas.y + 20 },
+  );
+
+  expect(() => canvas.dispatchEvent(invalid)).not.toThrow();
+  dispatchPointer(shell, 'pointermove', { pointerId: 61, x: 30, y: 40 });
+  expect(errors).toEqual([{ code: 'interaction.pointer-invalid', path: '/nativeEvent/button' }]);
+  expect(state.pointCalls).toEqual([]);
+
+  dispatchPointer(shell, 'pointerup', { pointerId: 61, x: 30, y: 40 });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 61, x: 5, y: 7 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 61, x: 5, y: 7 });
+  expect(state.commits).toHaveLength(1);
+  expect(errors).toHaveLength(1);
+});
+
+test('reports an unreadable pointer id once without quarantining an unknown stream', () => {
+  const state = selectionPorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  const canvas = childById(shell, 'brings-canvas-region');
+  const invalid = new VectoJSEvent('pointerdown', canvas, {
+    get pointerId() {
+      throw new Error('unreadable pointer id');
+    },
+  });
+
+  expect(() => canvas.dispatchEvent(invalid)).not.toThrow();
+  expect(errors).toEqual([{ code: 'interaction.pointer-invalid', path: '/nativeEvent/pointerId' }]);
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 63, x: 5, y: 7 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 63, x: 5, y: 7 });
+  expect(state.commits).toHaveLength(1);
+  expect(errors).toHaveLength(1);
+});
+
+test('terminally discards a live session when a later native getter throws', () => {
+  const state = selectionPorts();
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  let dirtyCalls = 0;
+  const shell = new EditorShell(1440, 900, {
+    ...state.ports,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  (shell as unknown as { _scene: Readonly<{ markDirty: () => void }> })._scene = {
+    markDirty: () => {
+      dirtyCalls += 1;
+    },
+  };
+  dispatchPointer(shell, 'pointerdown', { pointerId: 65, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 65, x: 30, y: 40 });
+  const canvas = childById(shell, 'brings-canvas-region');
+  const invalid = new VectoJSEvent(
+    'pointermove',
+    canvas,
+    {
+      pointerId: 65,
+      button: 0,
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      get metaKey() {
+        throw new Error('lost native state');
+      },
+    },
+    true,
+    { x: canvas.x + 40, y: canvas.y + 50 },
+  );
+
+  expect(() => canvas.dispatchEvent(invalid)).not.toThrow();
+  dispatchPointer(shell, 'pointermove', { pointerId: 65, x: 60, y: 70 });
+
+  expect(errors).toEqual([{ code: 'interaction.pointer-invalid', path: '/nativeEvent/metaKey' }]);
+  expect(state.commits).toEqual([]);
+  expect(dirtyCalls).toBe(2);
+
+  dispatchPointer(shell, 'pointerup', { pointerId: 65, x: 60, y: 70 });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 65, x: 4, y: 6 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 65, x: 4, y: 6 });
+  expect(state.commits).toHaveLength(1);
+  expect(errors).toHaveLength(1);
+});
+
 test('renders preview movement once per selected branch and paints marquee after outlines', () => {
   const start = interactionStart([first, second]);
   const state = selectionPorts({ ownerId: first });

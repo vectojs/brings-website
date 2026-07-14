@@ -294,6 +294,81 @@ test('does not let an accessor-backed outer preview overwrite a reentrant previe
   expect(state.dirtyCalls()).toBe(2);
 });
 
+test('reads the effect discriminant once and rejects a stale reentrant effect', () => {
+  const state = fixture();
+  const nested = visual([second]);
+  const outer = visual([first]);
+  let kindReads = 0;
+  const effect = {
+    get kind() {
+      kindReads += 1;
+      if (kindReads === 1) state.interpreter.apply({ kind: 'preview', visual: nested });
+      return 'preview' as const;
+    },
+    visual: outer,
+  } as SelectionGestureEffect;
+
+  expect(state.interpreter.apply(effect)).toBe(false);
+
+  expect(kindReads).toBe(1);
+  expect(state.interpreter.visual).toEqual(nested);
+  expect(state.dirtyCalls()).toBe(1);
+});
+
+test('reports deeply detached frozen commit and discard diagnostics with one accessor read', () => {
+  let commitCode = 'test.commit-source';
+  let commitPath = '/commit/source';
+  let commitCodeReads = 0;
+  let commitPathReads = 0;
+  const commitError = {
+    get code() {
+      commitCodeReads += 1;
+      return commitCode;
+    },
+    get path() {
+      commitPathReads += 1;
+      return commitPath;
+    },
+  };
+  const commit = fixture({ selectionFailure: commitError });
+
+  commit.interpreter.apply({ kind: 'commit-selection', proposal: proposal([]) });
+  commitCode = 'test.commit-mutated';
+  commitPath = '/commit/mutated';
+
+  expect(commitCodeReads).toBe(1);
+  expect(commitPathReads).toBe(1);
+  expect(commit.errors).toEqual([{ code: 'test.commit-source', path: '/commit/source' }]);
+  expect(commit.errors[0]).not.toBe(commitError);
+  expect(Object.isFrozen(commit.errors[0])).toBe(true);
+
+  let discardCode = 'test.discard-source';
+  let discardPath = '/discard/source';
+  let discardCodeReads = 0;
+  let discardPathReads = 0;
+  const discardError = {
+    get code() {
+      discardCodeReads += 1;
+      return discardCode;
+    },
+    get path() {
+      discardPathReads += 1;
+      return discardPath;
+    },
+  };
+  const discard = fixture();
+
+  discard.interpreter.apply({ kind: 'discard', reason: 'error', error: discardError });
+  discardCode = 'test.discard-mutated';
+  discardPath = '/discard/mutated';
+
+  expect(discardCodeReads).toBe(1);
+  expect(discardPathReads).toBe(1);
+  expect(discard.errors).toEqual([{ code: 'test.discard-source', path: '/discard/source' }]);
+  expect(discard.errors[0]).not.toBe(discardError);
+  expect(Object.isFrozen(discard.errors[0])).toBe(true);
+});
+
 test('does not install an outer preview after its accessor commits Core reentrantly', () => {
   const state = fixture();
   const outer = visual([first]);

@@ -8,6 +8,10 @@ import type { PageDelta } from '../editor/selectionCoordinates';
 import type { SelectionProposal } from '../editor/selectionInteraction';
 import type { SelectionGestureEffect, SelectionGestureVisual } from './MarqueeSelectionSession';
 
+const INTERRUPTED = Symbol('selection-interpreter-interrupted');
+
+type SnapshotGuard = () => boolean;
+
 export type SelectionGestureInterpreterPorts = Readonly<{
   commitSelection: (proposal: SelectionProposal) => Result<EditorSnapshot>;
   commitMove: (
@@ -17,31 +21,60 @@ export type SelectionGestureInterpreterPorts = Readonly<{
   markDirty: () => void;
 }>;
 
-function snapshotSelection(selection: StructuralSelection): StructuralSelection {
+function guardedRead<T>(read: () => T, guard?: SnapshotGuard): T {
+  const value = read();
+  if (guard !== undefined && !guard()) throw INTERRUPTED;
+  return value;
+}
+
+function snapshotError(error: BringsError): BringsError {
+  const code = error.code;
+  const path = error.path;
+  return Object.freeze({ code, path });
+}
+
+function snapshotSelection(
+  selection: StructuralSelection,
+  guard?: SnapshotGuard,
+): StructuralSelection {
+  const nodeIds = guardedRead(() => selection.nodeIds, guard);
+  const activeNodeId = guardedRead(() => selection.activeNodeId, guard);
+  const length = guardedRead(() => nodeIds.length, guard);
+  const detached = [] as (typeof nodeIds)[number][];
+  for (let index = 0; index < length; index += 1) {
+    detached.push(guardedRead(() => nodeIds[index]!, guard));
+  }
   return Object.freeze({
-    nodeIds: Object.freeze([...selection.nodeIds]),
-    activeNodeId: selection.activeNodeId,
+    nodeIds: Object.freeze(detached),
+    activeNodeId,
   });
 }
 
-function snapshotVisual(visual: SelectionGestureVisual): SelectionGestureVisual {
-  const marquee = visual.marquee;
-  const movementDelta = visual.movementDelta;
+function snapshotVisual(
+  visual: SelectionGestureVisual,
+  guard?: SnapshotGuard,
+): SelectionGestureVisual {
+  const selection = guardedRead(() => visual.selection, guard);
+  const marquee = guardedRead(() => visual.marquee, guard);
+  const movementDelta = guardedRead(() => visual.movementDelta, guard);
   return Object.freeze({
-    selection: snapshotSelection(visual.selection),
+    selection: snapshotSelection(selection, guard),
     marquee:
       marquee === null
         ? null
         : Object.freeze({
-            x: marquee.x,
-            y: marquee.y,
-            width: marquee.width,
-            height: marquee.height,
+            x: guardedRead(() => marquee.x, guard),
+            y: guardedRead(() => marquee.y, guard),
+            width: guardedRead(() => marquee.width, guard),
+            height: guardedRead(() => marquee.height, guard),
           }),
     movementDelta:
       movementDelta === null
         ? null
-        : (Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta),
+        : (Object.freeze({
+            x: guardedRead(() => movementDelta.x, guard),
+            y: guardedRead(() => movementDelta.y, guard),
+          }) as PageDelta),
   });
 }
 
@@ -99,43 +132,65 @@ export class SelectionGestureInterpreter {
 
   /** Apply one effect and report whether its Core commit changed a snapshot. */
   public apply(effect: SelectionGestureEffect): boolean {
-    if (effect.kind === 'ignore') return false;
-    if (effect.kind === 'preview') {
-      const version = this.stateVersion;
-      const next = snapshotVisual(effect.visual);
-      if (this.stateVersion !== version) return false;
-      if (this.currentVisual !== null && sameVisual(this.currentVisual, next)) return false;
-      this.currentVisual = next;
-      this.stateVersion += 1;
-      this.ports.markDirty();
-      return false;
-    }
-    if (effect.kind === 'discard') {
-      this.clearVisual();
-      const error = effect.error;
-      if (error !== undefined) this.ports.reportInteractionError(error);
-      return false;
-    }
-
     const version = this.stateVersion;
-    const hadVisual = this.currentVisual !== null;
-    const result =
-      effect.kind === 'commit-selection'
-        ? this.ports.commitSelection(effect.proposal)
-        : this.ports.commitMove({ proposal: effect.proposal, delta: effect.delta });
-    const ok = result.ok;
-    if (!ok) {
-      const error = (result as Readonly<{ ok: false; error: BringsError }>).error;
-      if (this.stateVersion === version && hadVisual) this.clearVisual();
-      this.ports.reportInteractionError(error);
-      return false;
+    const current = () => this.stateVersion === version;
+    try {
+      const kind = guardedRead(() => effect.kind, current);
+      if (kind === 'ignore') return false;
+      if (kind === 'preview') {
+        const preview = effect as Extract<SelectionGestureEffect, { kind: 'preview' }>;
+        const visual = guardedRead(() => preview.visual, current);
+        const next = snapshotVisual(visual, current);
+        if (this.currentVisual !== null && sameVisual(this.currentVisual, next)) return false;
+        this.currentVisual = next;
+        this.stateVersion += 1;
+        this.ports.markDirty();
+        return false;
+      }
+      if (kind === 'discard') {
+        const discard = effect as Extract<SelectionGestureEffect, { kind: 'discard' }>;
+        const sourceError = guardedRead(() => discard.error, current);
+        const error = sourceError === undefined ? undefined : snapshotError(sourceError);
+        if (!current()) return false;
+        this.clearVisual();
+        if (error !== undefined) this.ports.reportInteractionError(error);
+        return false;
+      }
+
+      const commit = effect as Extract<
+        SelectionGestureEffect,
+        { kind: 'commit-selection' | 'commit-move' }
+      >;
+      const proposal = guardedRead(() => commit.proposal, current);
+      const hadVisual = this.currentVisual !== null;
+      const result =
+        kind === 'commit-selection'
+          ? this.ports.commitSelection(proposal)
+          : this.ports.commitMove({
+              proposal,
+              delta: guardedRead(
+                () => (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>).delta,
+                current,
+              ),
+            });
+      const ok = result.ok;
+      if (!ok) {
+        const sourceError = (result as Readonly<{ ok: false; error: BringsError }>).error;
+        const error = snapshotError(sourceError);
+        if (current() && hadVisual) this.clearVisual();
+        this.ports.reportInteractionError(error);
+        return false;
+      }
+      if (current()) {
+        if (hadVisual) this.currentVisual = null;
+        this.stateVersion += 1;
+        this.ports.markDirty();
+      }
+      return true;
+    } catch (error) {
+      if (error === INTERRUPTED) return false;
+      throw error;
     }
-    if (this.stateVersion === version) {
-      if (hadVisual) this.currentVisual = null;
-      this.stateVersion += 1;
-      this.ports.markDirty();
-    }
-    return true;
   }
 
   private clearVisual(): void {

@@ -73,6 +73,27 @@ class EditorRegion extends Entity {
 export type CreationTool = 'frame' | 'rectangle';
 type CanvasTool = 'select' | CreationTool;
 
+type NativePointerSnapshot = Readonly<{
+  pointerId: number;
+  button: number;
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}>;
+
+type NativePointerSnapshotResult =
+  | Readonly<{ ok: true; value: NativePointerSnapshot }>
+  | Readonly<{ ok: false; error: BringsError; pointerId: number | null }>;
+
+function pointerInvalid(path: string, pointerId: number | null): NativePointerSnapshotResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'interaction.pointer-invalid', path }),
+    pointerId,
+  });
+}
+
 export interface EditorShellPorts {
   readonly documentSnapshot?: () => EditorSnapshot;
   readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
@@ -579,14 +600,13 @@ export class EditorShell extends Entity {
 
   private routeCanvasPointer(event: VectoJSEvent): void {
     const routeVersion = ++this.pointerRouteVersion;
-    const native = this.snapshotPointerEvent(event);
-    if (native === null) {
-      this.ports.reportInteractionError({
-        code: 'interaction.pointer-invalid',
-        path: '/pointerId',
-      });
+    const captured = this.snapshotPointerEvent(event);
+    if (this.pointerRouteVersion !== routeVersion) return;
+    if (!captured.ok) {
+      this.rejectInvalidNativePointer(event, captured);
       return;
     }
+    const native = captured.value;
     const pointerId = native.pointerId;
     if (this.quarantinedPointerIds.has(pointerId)) {
       if (event.type === 'pointerup' || event.type === 'pointercancel') {
@@ -703,15 +723,8 @@ export class EditorShell extends Entity {
     event.preventDefault();
   }
 
-  private snapshotPointerEvent(event: VectoJSEvent): Readonly<{
-    pointerId: number;
-    button: number;
-    shiftKey: boolean;
-    altKey: boolean;
-    ctrlKey: boolean;
-    metaKey: boolean;
-  }> | null {
-    const source = event.nativeEvent as
+  private snapshotPointerEvent(event: VectoJSEvent): NativePointerSnapshotResult {
+    let source:
       | {
           readonly pointerId?: number;
           readonly button?: number;
@@ -721,21 +734,92 @@ export class EditorShell extends Entity {
           readonly metaKey?: boolean;
         }
       | undefined;
-    const pointerId = source?.pointerId;
-    const button = source?.button;
-    const shiftKey = source?.shiftKey;
-    const altKey = source?.altKey;
-    const ctrlKey = source?.ctrlKey;
-    const metaKey = source?.metaKey;
-    if (pointerId === undefined || !Number.isFinite(pointerId)) return null;
-    return {
-      pointerId,
-      button: button ?? 0,
-      shiftKey: shiftKey ?? false,
-      altKey: altKey ?? false,
-      ctrlKey: ctrlKey ?? false,
-      metaKey: metaKey ?? false,
-    };
+    try {
+      source = event.nativeEvent as typeof source;
+    } catch {
+      return pointerInvalid('/nativeEvent', null);
+    }
+
+    let pointerId: number | undefined;
+    try {
+      pointerId = source?.pointerId;
+    } catch {
+      return pointerInvalid('/nativeEvent/pointerId', null);
+    }
+    if (pointerId === undefined || !Number.isFinite(pointerId)) {
+      return pointerInvalid('/nativeEvent/pointerId', null);
+    }
+
+    let button: number | undefined;
+    let shiftKey: boolean | undefined;
+    let altKey: boolean | undefined;
+    let ctrlKey: boolean | undefined;
+    let metaKey: boolean | undefined;
+    try {
+      button = source?.button;
+    } catch {
+      return pointerInvalid('/nativeEvent/button', pointerId);
+    }
+    try {
+      shiftKey = source?.shiftKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/shiftKey', pointerId);
+    }
+    try {
+      altKey = source?.altKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/altKey', pointerId);
+    }
+    try {
+      ctrlKey = source?.ctrlKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/ctrlKey', pointerId);
+    }
+    try {
+      metaKey = source?.metaKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/metaKey', pointerId);
+    }
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        pointerId,
+        button: button ?? 0,
+        shiftKey: shiftKey ?? false,
+        altKey: altKey ?? false,
+        ctrlKey: ctrlKey ?? false,
+        metaKey: metaKey ?? false,
+      }),
+    });
+  }
+
+  private rejectInvalidNativePointer(
+    event: VectoJSEvent,
+    failure: Extract<NativePointerSnapshotResult, { ok: false }>,
+  ): void {
+    const pointerId = failure.pointerId;
+    if (pointerId === null) {
+      this.ports.reportInteractionError(failure.error);
+      return;
+    }
+    const terminal = event.type === 'pointerup' || event.type === 'pointercancel';
+    if (this.quarantinedPointerIds.has(pointerId)) {
+      if (terminal) this.quarantinedPointerIds.delete(pointerId);
+      return;
+    }
+
+    const session = this.selectionSession;
+    if (session !== null && this.selectionPointerId === pointerId) {
+      const effect = session.cancel({ kind: 'error', error: failure.error });
+      this.closeSelectionSession(session);
+      if (!terminal) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      return;
+    }
+
+    if (!terminal) this.quarantinedPointerIds.add(pointerId);
+    this.ports.reportInteractionError(failure.error);
   }
 
   private selectionSample(
