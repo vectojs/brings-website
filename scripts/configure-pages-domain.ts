@@ -29,6 +29,8 @@ export type ConfigurePagesDomainOptions = Readonly<{
   apiToken: string;
   projectName: string;
   domainName: string;
+  /** Stable Pages hostname; defaults to `<projectName>.pages.dev`. */
+  pagesHostname?: string;
   fetch?: FetchLike;
   sleep?: Sleep;
   activationAttempts?: number;
@@ -110,7 +112,9 @@ async function ensureDnsRecord(
   fetchImpl: FetchLike,
   domain: PagesDomain,
 ): Promise<boolean> {
-  const expectedTarget = `${options.projectName}.pages.dev`;
+  const expectedTarget = normalizedHostname(
+    options.pagesHostname ?? `${options.projectName}.pages.dev`,
+  );
   const query = new URLSearchParams({ name: options.domainName });
   const recordsUrl = `${API_BASE}/zones/${domain.zone_tag}/dns_records`;
   const records = await requestResult<readonly DnsRecord[]>(
@@ -149,6 +153,11 @@ async function ensureDnsRecord(
 export async function configurePagesDomain(options: ConfigurePagesDomainOptions): Promise<void> {
   assertIdentifier(options.projectName, 'Pages project name', /^[a-z0-9-]+$/);
   assertIdentifier(options.domainName, 'domain name', /^[a-z0-9.-]+$/);
+  assertIdentifier(
+    normalizedHostname(options.pagesHostname ?? `${options.projectName}.pages.dev`),
+    'Pages hostname',
+    /^[a-z0-9.-]+$/,
+  );
   assertIdentifier(options.accountId, 'Cloudflare account ID', /^[A-Za-z0-9_-]+$/);
   if (options.apiToken.length === 0) throw new Error('Cloudflare API token is required.');
 
@@ -209,14 +218,16 @@ export async function configurePagesDomain(options: ConfigurePagesDomainOptions)
 }
 
 if (import.meta.main) {
-  const [projectName, domainName] = process.argv.slice(2);
+  const [projectName, domainName, pagesHostname] = process.argv.slice(2);
   if (projectName === undefined || domainName === undefined) {
-    console.error('Usage: bun scripts/configure-pages-domain.ts <project_name> <domain_name>');
+    console.error(
+      'Usage: bun scripts/configure-pages-domain.ts <project_name> <domain_name> [pages_hostname]',
+    );
     process.exitCode = 1;
   } else {
     const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? '';
     const apiToken = process.env.CLOUDFLARE_API_TOKEN ?? '';
-    configurePagesDomain({ accountId, apiToken, projectName, domainName }).catch(
+    configurePagesDomain({ accountId, apiToken, projectName, domainName, pagesHostname }).catch(
       (error: unknown) => {
         console.error(error instanceof Error ? error.message : String(error));
         process.exitCode = 1;

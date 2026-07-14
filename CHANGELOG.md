@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Corrected CI and local deployment to target the existing Cloudflare Pages
+  project `brings` while retaining `brings-website.pages.dev` and
+  `brings-website.vectojs.org` as the public domains.
+- Upgraded to Brings Core 0.8.0, VectoJS Core 1.8.0, and VectoJS UI 1.9.0.
 - Added exact intersection marquee selection, dynamic Shift union, Shift-click
   toggle, selected-object movement, and Escape/`pointercancel` rollback through
   branded VectoJS logical/page coordinates. Read-only frozen diagnostics now
