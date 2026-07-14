@@ -779,6 +779,68 @@ test('snapshots native pointer getters once before beginning a session', () => {
   dispatchPointer(shell, 'pointercancel', { pointerId: 21, x: 10, y: 20 });
 });
 
+test('exposes fresh idle, pending, marquee, and terminal interaction diagnostics', () => {
+  const state = selectionPorts();
+  const shell = new EditorShell(1440, 900, state.ports);
+
+  expect(shell.interactionSnapshot()).toEqual({
+    phase: 'idle',
+    terminalEffect: null,
+    pointerId: null,
+    shiftKey: null,
+    start: null,
+    current: null,
+    visual: null,
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 59, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 59, x: 13.9, y: 20, shiftKey: true });
+  const pending = shell.interactionSnapshot();
+  expect(pending).toMatchObject({
+    phase: 'pending',
+    terminalEffect: null,
+    pointerId: 59,
+    shiftKey: true,
+    start: { viewport: { x: 10, y: 20 }, page: { x: 10, y: 20 } },
+    current: { viewport: { y: 20 }, page: { y: 20 } },
+    visual: null,
+  });
+  expect(pending.current?.viewport.x).toBeCloseTo(13.9, 10);
+  expect(pending.current?.page.x).toBeCloseTo(13.9, 10);
+
+  dispatchPointer(shell, 'pointermove', { pointerId: 59, x: 14, y: 20, shiftKey: true });
+  const marquee = shell.interactionSnapshot();
+  expect(marquee).toMatchObject({
+    phase: 'marquee',
+    terminalEffect: null,
+    current: { viewport: { x: 14, y: 20 } },
+    visual: {
+      selection: { nodeIds: [first], activeNodeId: first },
+      marquee: { x: 10, y: 20, width: 4, height: 0 },
+      movementDelta: null,
+    },
+  });
+  expect(Object.isFrozen(marquee)).toBe(true);
+  expect(Object.isFrozen(marquee.current)).toBe(true);
+  expect(Object.isFrozen(marquee.visual)).toBe(true);
+  expect(Object.isFrozen(marquee.visual?.selection.nodeIds)).toBe(true);
+  expect(JSON.parse(JSON.stringify(marquee))).toEqual(marquee);
+
+  dispatchPointer(shell, 'pointerup', { pointerId: 59, x: 14, y: 20, shiftKey: true });
+  const terminal = shell.interactionSnapshot();
+  const terminalAgain = shell.interactionSnapshot();
+  expect(terminal).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit-selection',
+    pointerId: 59,
+    current: { viewport: { x: 14, y: 20 } },
+    visual: null,
+  });
+  expect(terminal).not.toBe(terminalAgain);
+  expect(terminal.start).not.toBe(terminalAgain.start);
+  expect(terminal.current).not.toBe(terminalAgain.current);
+});
+
 test('contains a native pointer getter throw and quarantines a known id until raw terminal', () => {
   const state = selectionPorts();
   const errors: Array<Readonly<{ code: string; path: string }>> = [];

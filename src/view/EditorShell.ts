@@ -18,7 +18,12 @@ import {
   isNativeEditorTarget,
   resolveEditorShortcut,
 } from './editorShortcuts';
-import { MarqueeSelectionSession, type SelectionPointerSample } from './MarqueeSelectionSession';
+import {
+  MarqueeSelectionSession,
+  type SelectionGestureSessionSnapshot,
+  type SelectionGestureVisual,
+  type SelectionPointerSample,
+} from './MarqueeSelectionSession';
 import { SelectionGestureInterpreter } from './SelectionGestureInterpreter';
 
 export type DrawerSide = 'left' | 'right';
@@ -86,11 +91,69 @@ type NativePointerSnapshotResult =
   | Readonly<{ ok: true; value: NativePointerSnapshot }>
   | Readonly<{ ok: false; error: BringsError; pointerId: number | null }>;
 
+/** Fresh JSON-safe diagnostic state exposed only through the debug reader. */
+export type EditorInteractionSnapshot = Readonly<{
+  phase: 'idle' | SelectionGestureSessionSnapshot['phase'];
+  terminalEffect: SelectionGestureSessionSnapshot['terminalEffect'];
+  pointerId: number | null;
+  shiftKey: boolean | null;
+  start: SelectionGestureSessionSnapshot['start'] | null;
+  current: SelectionGestureSessionSnapshot['current'] | null;
+  visual: SelectionGestureVisual | null;
+}>;
+
 function pointerInvalid(path: string, pointerId: number | null): NativePointerSnapshotResult {
   return Object.freeze({
     ok: false,
     error: Object.freeze({ code: 'interaction.pointer-invalid', path }),
     pointerId,
+  });
+}
+
+function snapshotPosition(
+  position: SelectionGestureSessionSnapshot['start'],
+): SelectionGestureSessionSnapshot['start'] {
+  return Object.freeze({
+    viewport: Object.freeze({ x: position.viewport.x, y: position.viewport.y }),
+    page: Object.freeze({ x: position.page.x, y: position.page.y }),
+  });
+}
+
+function snapshotSession(
+  session: SelectionGestureSessionSnapshot,
+): SelectionGestureSessionSnapshot {
+  return Object.freeze({
+    phase: session.phase,
+    terminalEffect: session.terminalEffect,
+    pointerId: session.pointerId,
+    shiftKey: session.shiftKey,
+    start: snapshotPosition(session.start),
+    current: snapshotPosition(session.current),
+  });
+}
+
+function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGestureVisual | null {
+  if (visual === null) return null;
+  const marquee = visual.marquee;
+  const movementDelta = visual.movementDelta;
+  return Object.freeze({
+    selection: Object.freeze({
+      nodeIds: Object.freeze([...visual.selection.nodeIds]),
+      activeNodeId: visual.selection.activeNodeId,
+    }),
+    marquee:
+      marquee === null
+        ? null
+        : Object.freeze({
+            x: marquee.x,
+            y: marquee.y,
+            width: marquee.width,
+            height: marquee.height,
+          }),
+    movementDelta:
+      movementDelta === null
+        ? null
+        : (Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta),
   });
 }
 
@@ -108,9 +171,6 @@ export interface EditorShellPorts {
     }>,
   ) => Result<EditorSnapshot>;
   readonly reportInteractionError?: (error: BringsError) => void;
-  // TODO(Task 9): remove these compatibility-only ports after main.ts uses proposal ports.
-  readonly selectAt?: (x: number, y: number) => Result<EditorSnapshot>;
-  readonly moveSelectionBy?: (deltaX: number, deltaY: number) => Result<EditorSnapshot>;
   readonly runHistory?: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
   readonly deleteSelection?: () => Result<EditorSnapshot>;
 }
@@ -381,6 +441,7 @@ export class EditorShell extends Entity {
   private activeTool: CanvasTool = 'select';
   private selectionSession: MarqueeSelectionSession | null = null;
   private selectionPointerId: number | null = null;
+  private terminalInteraction: SelectionGestureSessionSnapshot | null = null;
   private pointerRouteVersion = 0;
   private readonly quarantinedPointerIds = new Set<number>();
   private layout: EditorLayout;
@@ -425,6 +486,32 @@ export class EditorShell extends Entity {
   /** True while the narrow-screen shell supports editing tools. */
   public get authoringEnabled(): boolean {
     return this.width >= 600;
+  }
+
+  /** Read a fresh detached interaction snapshot without exposing mutation controls. */
+  public interactionSnapshot(): EditorInteractionSnapshot {
+    const source = this.selectionSession?.snapshot() ?? this.terminalInteraction;
+    if (source === null) {
+      return Object.freeze({
+        phase: 'idle',
+        terminalEffect: null,
+        pointerId: null,
+        shiftKey: null,
+        start: null,
+        current: null,
+        visual: null,
+      });
+    }
+    const session = snapshotSession(source);
+    return Object.freeze({
+      phase: session.phase,
+      terminalEffect: session.terminalEffect,
+      pointerId: session.pointerId,
+      shiftKey: session.shiftKey,
+      start: session.start,
+      current: session.current,
+      visual: snapshotVisual(this.selectionInterpreter.visual),
+    });
   }
 
   public openDrawer(side: DrawerSide): boolean {
@@ -720,6 +807,7 @@ export class EditorShell extends Entity {
     }
     this.selectionSession = begun.value;
     this.selectionPointerId = pointerId;
+    this.terminalInteraction = null;
     event.preventDefault();
   }
 
@@ -850,8 +938,10 @@ export class EditorShell extends Entity {
 
   private closeSelectionSession(expected: MarqueeSelectionSession): boolean {
     if (this.selectionSession !== expected) return false;
+    const terminal = expected.snapshot();
     this.selectionSession = null;
     this.selectionPointerId = null;
+    this.terminalInteraction = terminal.phase === 'terminal' ? snapshotSession(terminal) : null;
     return true;
   }
 

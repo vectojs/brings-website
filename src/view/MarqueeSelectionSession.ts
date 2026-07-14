@@ -25,6 +25,7 @@ const INTERRUPTED = Symbol('marquee-session-interrupted');
 const IGNORE_EFFECT = Object.freeze({ kind: 'ignore' } as const);
 
 type SelectionGesturePhase = 'pending' | 'marquee' | 'moving' | 'terminal';
+type SelectionGestureTerminalEffect = 'commit-selection' | 'commit-move' | 'discard';
 
 type SnapshotGuard = () => boolean;
 
@@ -50,6 +51,22 @@ export type SelectionPointerSample = Readonly<{
   viewportPoint: ViewportPoint;
   pagePoint: EditorPagePoint;
   shiftKey: boolean;
+}>;
+
+type DiagnosticPoint = Readonly<{ x: number; y: number }>;
+type DiagnosticPosition = Readonly<{
+  viewport: DiagnosticPoint;
+  page: DiagnosticPoint;
+}>;
+
+/** Fresh JSON-safe state for read-only interaction diagnostics. */
+export type SelectionGestureSessionSnapshot = Readonly<{
+  phase: SelectionGesturePhase;
+  terminalEffect: SelectionGestureTerminalEffect | null;
+  pointerId: number;
+  shiftKey: boolean;
+  start: DiagnosticPosition;
+  current: DiagnosticPosition;
 }>;
 
 /** Transient canvas-native state produced without mutating Brings Core. */
@@ -199,6 +216,17 @@ function snapshotSample(sample: SelectionPointerSample): SelectionPointerSample 
   return Object.freeze({ pointerId, viewportPoint, pagePoint, shiftKey });
 }
 
+function diagnosticPoint(point: Readonly<{ x: number; y: number }>): DiagnosticPoint {
+  return Object.freeze({ x: point.x, y: point.y });
+}
+
+function diagnosticPosition(viewport: ViewportPoint, page: EditorPagePoint): DiagnosticPosition {
+  return Object.freeze({
+    viewport: diagnosticPoint(viewport),
+    page: diagnosticPoint(page),
+  });
+}
+
 function snapshotPointResult(
   result: Result<PointerProposal>,
   guard?: SnapshotGuard,
@@ -253,6 +281,8 @@ export class MarqueeSelectionSession {
   private currentProposal: SelectionProposal;
   private moveProposal: SelectionProposal | null = null;
   private latestVisual: SelectionGestureVisual | null = null;
+  private currentSample: SelectionPointerSample;
+  private terminalEffect: SelectionGestureTerminalEffect | null = null;
 
   private constructor(
     private readonly ownerPointerId: number,
@@ -262,8 +292,10 @@ export class MarqueeSelectionSession {
     private readonly interactionStart: SelectionInteractionStart,
     private readonly ownerId: NodeId | null,
     beginProposal: SelectionProposal,
+    beginSample: SelectionPointerSample,
   ) {
     this.currentProposal = beginProposal;
+    this.currentSample = beginSample;
   }
 
   /** Resolve and detach the click proposal before exposing a live session. */
@@ -298,8 +330,21 @@ export class MarqueeSelectionSession {
         capturedStart,
         point.value.ownerId,
         point.value.proposal,
+        capturedSample,
       ),
     );
+  }
+
+  /** Return a newly detached immutable diagnostic view of the accepted owner stream. */
+  public snapshot(): SelectionGestureSessionSnapshot {
+    return Object.freeze({
+      phase: this.phase,
+      terminalEffect: this.terminalEffect,
+      pointerId: this.ownerPointerId,
+      shiftKey: this.currentSample.shiftKey,
+      start: diagnosticPosition(this.startViewportPoint, this.startPagePoint),
+      current: diagnosticPosition(this.currentSample.viewportPoint, this.currentSample.pagePoint),
+    });
   }
 
   /** Advance the owner gesture and return only its latest transient effect. */
@@ -311,6 +356,7 @@ export class MarqueeSelectionSession {
     const version = this.stateVersion;
     const captured = this.captureOwnerSample(sample, version);
     if (captured === null) return IGNORE_EFFECT;
+    this.currentSample = captured;
     const outcome = this.advance(captured, provider, version);
     return outcome.kind === 'effect' ? outcome.effect : IGNORE_EFFECT;
   }
@@ -324,13 +370,14 @@ export class MarqueeSelectionSession {
     const version = this.stateVersion;
     const captured = this.captureOwnerSample(sample, version);
     if (captured === null) return IGNORE_EFFECT;
+    this.currentSample = captured;
     const outcome = this.advance(captured, provider, version);
     if (outcome.kind === 'interrupted') return IGNORE_EFFECT;
     if (outcome.kind === 'effect' && outcome.effect.kind === 'discard') {
       return outcome.effect;
     }
     if (this.phase !== 'moving') {
-      this.markTerminal();
+      this.markTerminal('commit-selection');
       return freezeCommitSelection(this.currentProposal);
     }
     const delta = this.latestVisual?.movementDelta;
@@ -341,10 +388,12 @@ export class MarqueeSelectionSession {
     }
     const deltaX = delta.x;
     const deltaY = delta.y;
-    this.markTerminal();
-    return deltaX === 0 && deltaY === 0
-      ? freezeCommitSelection(this.currentProposal)
-      : freezeCommitMove(this.currentProposal, delta);
+    if (deltaX === 0 && deltaY === 0) {
+      this.markTerminal('commit-selection');
+      return freezeCommitSelection(this.currentProposal);
+    }
+    this.markTerminal('commit-move');
+    return freezeCommitMove(this.currentProposal, delta);
   }
 
   /** End the owner session without writing captured state back into Core. */
@@ -363,7 +412,7 @@ export class MarqueeSelectionSession {
           () => this.isCurrent(version),
         );
         if (pointerId !== this.ownerPointerId) return IGNORE_EFFECT;
-        this.markTerminal();
+        this.markTerminal('discard');
         return Object.freeze({ kind: 'discard', reason: 'pointercancel' });
       }
       if (kind === 'error') {
@@ -373,10 +422,10 @@ export class MarqueeSelectionSession {
           () => this.isCurrent(version),
         );
         const detachedError = snapshotError(error, () => this.isCurrent(version));
-        this.markTerminal();
+        this.markTerminal('discard');
         return Object.freeze({ kind: 'discard', reason: 'error', error: detachedError });
       }
-      this.markTerminal();
+      this.markTerminal('discard');
       return Object.freeze({ kind: 'discard', reason: 'escape' });
     } catch (error) {
       if (error === INTERRUPTED) return IGNORE_EFFECT;
@@ -541,14 +590,15 @@ export class MarqueeSelectionSession {
     return this.phase !== 'terminal' && this.stateVersion === version;
   }
 
-  private markTerminal(): void {
+  private markTerminal(effect: SelectionGestureTerminalEffect): void {
     this.phase = 'terminal';
+    this.terminalEffect = effect;
     this.stateVersion += 1;
   }
 
   private discard(error: BringsError): SelectionGestureEffect {
     const detachedError = snapshotError(error);
-    this.markTerminal();
+    this.markTerminal('discard');
     return Object.freeze({
       kind: 'discard',
       reason: detachedError.code === 'interaction.stale' ? 'stale' : 'error',

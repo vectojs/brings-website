@@ -195,6 +195,59 @@ test('stays pending below and enters marquee at the four logical-pixel squared t
   expect(log.area).toHaveLength(1);
 });
 
+test('exposes fresh frozen JSON-safe diagnostics and retains accepted pending samples', () => {
+  const start = interactionStart();
+  const { provider } = providerFixture({ ownerId: null });
+  const session = beginSession(start, pointerSample(71, 10, 20, false, 110, 120), provider);
+
+  expect(session.update(pointerSample(71, 13.9, 20, true, 113.9, 120), provider)).toEqual({
+    kind: 'ignore',
+  });
+  const firstSnapshot = session.snapshot();
+  const secondSnapshot = session.snapshot();
+
+  expect(firstSnapshot).toEqual({
+    phase: 'pending',
+    terminalEffect: null,
+    pointerId: 71,
+    shiftKey: true,
+    start: {
+      viewport: { x: 10, y: 20 },
+      page: { x: 110, y: 120 },
+    },
+    current: {
+      viewport: { x: 13.9, y: 20 },
+      page: { x: 113.9, y: 120 },
+    },
+  });
+  expect(firstSnapshot).not.toBe(secondSnapshot);
+  expect(firstSnapshot.start).not.toBe(secondSnapshot.start);
+  expect(firstSnapshot.current).not.toBe(secondSnapshot.current);
+  expect(firstSnapshot.start.viewport).not.toBe(secondSnapshot.start.viewport);
+  expect(Object.isFrozen(firstSnapshot)).toBe(true);
+  expect(Object.isFrozen(firstSnapshot.start)).toBe(true);
+  expect(Object.isFrozen(firstSnapshot.start.viewport)).toBe(true);
+  expect(Object.isFrozen(firstSnapshot.current.page)).toBe(true);
+  expect(JSON.parse(JSON.stringify(firstSnapshot))).toEqual(firstSnapshot);
+
+  session.update(pointerSample(71, 14, 20, false, 114, 120), provider);
+  expect(firstSnapshot.phase).toBe('pending');
+  expect(firstSnapshot.current.viewport.x).toBe(13.9);
+  expect(session.snapshot()).toMatchObject({
+    phase: 'marquee',
+    terminalEffect: null,
+    current: { viewport: { x: 14, y: 20 }, page: { x: 114, y: 120 } },
+  });
+
+  expect(session.finish(pointerSample(71, 14, 20, false, 114, 120), provider)).toMatchObject({
+    kind: 'commit-selection',
+  });
+  const terminal = session.snapshot();
+  session.cancel({ kind: 'escape' });
+  expect(session.snapshot()).toEqual(terminal);
+  expect(terminal).toMatchObject({ phase: 'terminal', terminalEffect: 'commit-selection' });
+});
+
 test('normalizes a reverse-direction marquee before provider and preview', () => {
   const start = interactionStart();
   const { provider, log } = providerFixture({ ownerId: null });
