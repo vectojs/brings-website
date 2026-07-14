@@ -24,6 +24,8 @@ const documentId = '00000000-0000-4000-8000-000000000001';
 const pageId = '00000000-0000-4000-8000-000000000002' as PageId;
 const first = '11111111-1111-4111-8111-111111111111' as NodeId;
 const second = '22222222-2222-4222-8222-222222222222' as NodeId;
+const third = '33333333-3333-4333-8333-333333333333' as NodeId;
+const fourth = '44444444-4444-4444-8444-444444444444' as NodeId;
 
 const resizeHandles = Object.freeze([
   { handle: 'north-west', point: { x: 100, y: 120 } },
@@ -1737,4 +1739,191 @@ test('exposes fresh detached frozen resizing diagnostics with modifiers and Core
   expect(Object.isFrozen('bounds' in snapshot ? snapshot.bounds : null)).toBe(true);
   expect(Object.isFrozen('anchor' in snapshot ? snapshot.anchor : null)).toBe(true);
   expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
+});
+
+test('captures every caller-owned resize-start accessor exactly once before retaining it', () => {
+  const source = resizeStart();
+  const reads = new Map<string, number>();
+  const read = <T>(name: string, value: T): T => {
+    reads.set(name, (reads.get(name) ?? 0) + 1);
+    return value;
+  };
+  const handles = source.handles.map((entry, index) => ({
+    get handle() {
+      return read(`handles.${index}.handle`, entry.handle);
+    },
+    get point() {
+      return {
+        get x() {
+          return read(`handles.${index}.point.x`, entry.point.x);
+        },
+        get y() {
+          return read(`handles.${index}.point.y`, entry.point.y);
+        },
+      };
+    },
+  })) as readonly ResizeHandlePosition[];
+  const getterStart = {
+    get token() {
+      return read('token', source.token);
+    },
+    get selection() {
+      return read('selection', source.selection);
+    },
+    get bounds() {
+      return read('bounds', source.bounds);
+    },
+    get handles() {
+      return read('handles', handles);
+    },
+  } as ResizeInteractionStart;
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot([first]),
+    beginResizeInteraction: () => ({ ok: true, value: getterStart }),
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 101, x: 200, y: 200 });
+
+  expect(shell.interactionSnapshot()).toMatchObject({ phase: 'resizing', pointerId: 101 });
+  expect([...reads.values()].every((count) => count === 1)).toBe(true);
+});
+
+test('never rereads or retains a mutable resize start after pointerdown', () => {
+  const source = resizeStart();
+  const mutableBounds = { ...source.bounds };
+  const mutableHandles = source.handles.map((entry) => ({
+    handle: entry.handle,
+    point: { ...entry.point },
+  }));
+  let handlesReads = 0;
+  let armed = false;
+  let shell!: EditorShell;
+  const callerStart = {
+    token: source.token,
+    selection: source.selection,
+    bounds: mutableBounds,
+    get handles() {
+      handlesReads += 1;
+      if (armed) {
+        const canvas = childById(shell, 'brings-canvas-region');
+        canvas.dispatchEvent(new VectoJSEvent('keydown', canvas, { key: 'Escape' }));
+      }
+      return mutableHandles;
+    },
+  } as ResizeInteractionStart;
+  shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot([first]),
+    beginResizeInteraction: () => ({ ok: true, value: callerStart }),
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 102, x: 200, y: 200 });
+  armed = true;
+  mutableBounds.minX = -999;
+  mutableHandles[0]!.point.x = -999;
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(handlesReads).toBe(1);
+  expect(shell.interactionSnapshot()).toMatchObject({ phase: 'resizing', pointerId: 102 });
+  expect(
+    recording.calls.some(
+      ({ method, args }) =>
+        method === 'roundRect' && JSON.stringify(args.slice(0, 5)) === '[96,116,8,8,0]',
+    ),
+  ).toBe(true);
+  expect(
+    recording.calls.some(({ method, args }) => method === 'roundRect' && Number(args[0]) === -1003),
+  ).toBe(false);
+});
+
+test('applies resize preview only to authoritative command roots and their descendants', () => {
+  const before = editorSnapshot([first, fourth]);
+  const document: EditorSnapshot = {
+    ...before,
+    document: {
+      ...before.document,
+      pages: [{ ...before.document.pages[0]!, rootNodeIds: [first, third, fourth] }],
+      nodes: [
+        ...before.document.nodes,
+        {
+          id: third,
+          name: 'Command root',
+          parentId: null,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 300, 100],
+          type: 'rectangle',
+          width: 30,
+          height: 20,
+          cornerRadii: [0, 0, 0, 0],
+          fill: { type: 'solid', r: 0, g: 0, b: 0, a: 1 },
+          stroke: null,
+        },
+        {
+          id: fourth,
+          name: 'Selected sibling outside command',
+          parentId: null,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 400, 100],
+          type: 'rectangle',
+          width: 40,
+          height: 20,
+          cornerRadii: [0, 0, 0, 0],
+          fill: { type: 'solid', r: 0, g: 0, b: 0, a: 1 },
+          stroke: null,
+        },
+      ],
+    },
+  };
+  const start = resizeStart();
+  const delta = Object.freeze([2, 0, 0, 2, -100, -120]) as Matrix;
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => document,
+    beginResizeInteraction: () => ({ ok: true, value: start }),
+    proposeResize: ({ input }) => {
+      const base = resizeProposal(start, input, delta);
+      return {
+        ok: true,
+        value: Object.freeze({
+          ...base,
+          selection: Object.freeze({
+            nodeIds: Object.freeze([first, fourth]),
+            activeNodeId: fourth,
+          }),
+          resize: Object.freeze({
+            ...base.resize,
+            command: Object.freeze({
+              ...base.resize.command,
+              nodeIds: Object.freeze([first, third]),
+            }),
+          }),
+        }),
+      };
+    },
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 103, x: 200, y: 200 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 103, x: 240, y: 230 });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 2, 340, 176],
+    args: [0, 0, 100, 80, [0, 0, 0, 0]],
+  });
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 2, 360, 200],
+    args: [0, 0, 20, 16, [0, 0, 0, 0]],
+  });
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [2, 0, 0, 2, 740, 136],
+    args: [0, 0, 30, 20, [0, 0, 0, 0]],
+  });
+  expect(recording.paintedRects).toContainEqual({
+    matrix: [1, 0, 0, 1, 640, 156],
+    args: [0, 0, 40, 20, [0, 0, 0, 0]],
+  });
 });

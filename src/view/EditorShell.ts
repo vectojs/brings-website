@@ -11,7 +11,6 @@ import type {
   Matrix,
   ResizeBounds,
   ResizeHandle,
-  ResizeHandlePosition,
   ResizePoint,
   Result,
   SceneNode,
@@ -39,6 +38,11 @@ import {
   type SelectionPointerSample,
 } from './MarqueeSelectionSession';
 import {
+  type CapturedResizeInteraction,
+  captureResizeInteraction,
+  resolveResizePreviewLocalMatrix,
+} from './ResizeInteractionGeometry';
+import {
   ResizeSelectionSession,
   type ResizePointerSample,
   type ResizeSelectionSessionSnapshot,
@@ -48,10 +52,6 @@ import { SelectionGestureInterpreter } from './SelectionGestureInterpreter';
 export type DrawerSide = 'left' | 'right';
 
 const IDENTITY_MATRIX: Matrix = Object.freeze([1, 0, 0, 1, 0, 0]);
-const RESIZE_HANDLE_SIZE = 8;
-const RESIZE_HANDLE_HIT_SLOP = 6;
-const RESIZE_HANDLE_HALF_SIZE = RESIZE_HANDLE_SIZE / 2;
-const RESIZE_HANDLE_HIT_HALF_SIZE = RESIZE_HANDLE_HALF_SIZE + RESIZE_HANDLE_HIT_SLOP;
 
 function multiplyMatrices(left: Matrix, right: Matrix): Matrix | null {
   const product = [
@@ -77,74 +77,6 @@ function applyAxisAlignedMatrix(renderer: IRenderer, matrix: Matrix): boolean {
   renderer.translate(matrix[4], matrix[5]);
   renderer.scale(matrix[0], matrix[3]);
   return true;
-}
-
-function axisAlignedInverse(matrix: Matrix): Matrix | null {
-  if (matrix[1] !== 0 || matrix[2] !== 0 || matrix[0] === 0 || matrix[3] === 0) return null;
-  const inverse = [
-    1 / matrix[0],
-    0,
-    0,
-    1 / matrix[3],
-    -matrix[4] / matrix[0],
-    -matrix[5] / matrix[3],
-  ];
-  return inverse.every(Number.isFinite) ? (Object.freeze(inverse) as Matrix) : null;
-}
-
-type ResizeMatrixResult =
-  | Readonly<{ ok: true; value: Matrix }>
-  | Readonly<{ ok: false; reason: 'unsupported' | 'overflow' }>;
-
-function resizeLocalMatrix(parent: Matrix, local: Matrix, delta: Matrix): ResizeMatrixResult {
-  if (
-    parent[1] !== 0 ||
-    parent[2] !== 0 ||
-    local[1] !== 0 ||
-    local[2] !== 0 ||
-    delta[1] !== 0 ||
-    delta[2] !== 0
-  ) {
-    return Object.freeze({ ok: false, reason: 'unsupported' });
-  }
-  const inverse = axisAlignedInverse(parent);
-  if (inverse === null) return Object.freeze({ ok: false, reason: 'unsupported' });
-  const deltaInParent = multiplyMatrices(inverse, delta);
-  if (deltaInParent === null) return Object.freeze({ ok: false, reason: 'overflow' });
-  const composed = multiplyMatrices(deltaInParent, parent);
-  if (composed === null) return Object.freeze({ ok: false, reason: 'overflow' });
-  const value = multiplyMatrices(composed, local);
-  return value === null
-    ? Object.freeze({ ok: false, reason: 'overflow' })
-    : Object.freeze({ ok: true, value });
-}
-
-function transformResizePoint(matrix: Matrix, point: ResizePoint): ResizePoint | null {
-  if (matrix[1] !== 0 || matrix[2] !== 0) return null;
-  const x = matrix[0] * point.x + matrix[4];
-  const y = matrix[3] * point.y + matrix[5];
-  return Number.isFinite(x) && Number.isFinite(y) ? Object.freeze({ x, y }) : null;
-}
-
-function hitResizeHandle(
-  handles: readonly ResizeHandlePosition[],
-  point: ResizePoint,
-): ResizeHandle | null {
-  let hit: ResizeHandle | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const entry of handles) {
-    const dx = point.x - entry.point.x;
-    const dy = point.y - entry.point.y;
-    if (Math.abs(dx) > RESIZE_HANDLE_HIT_HALF_SIZE || Math.abs(dy) > RESIZE_HANDLE_HIT_HALF_SIZE) {
-      continue;
-    }
-    const distance = dx * dx + dy * dy;
-    if (distance < bestDistance) {
-      hit = entry.handle;
-      bestDistance = distance;
-    }
-  }
-  return hit;
 }
 
 class EditorRegion extends Entity {
@@ -690,7 +622,7 @@ export class EditorShell extends Entity {
   private selectionPointerId: number | null = null;
   private resizeSession: ResizeSelectionSession | null = null;
   private resizePointerId: number | null = null;
-  private resizeStart: ResizeInteractionStart | null = null;
+  private resizeInteraction: CapturedResizeInteraction | null = null;
   private terminalInteraction:
     SelectionGestureSessionSnapshot | ResizeSelectionSessionSnapshot | null = null;
   private pointerRouteVersion = 0;
@@ -900,6 +832,7 @@ export class EditorShell extends Entity {
     const selected = new Set((visual?.selection ?? snapshot.selection).nodeIds);
     const movementDelta = visual?.movementDelta;
     const resizeDelta = visual?.resize?.command.delta;
+    const resizeRoots = new Set(visual?.resize?.command.nodeIds ?? []);
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
     const nodeIndexes = new Map(document.nodes.map((node, index) => [node.id, index]));
     const renderNode = (
@@ -921,10 +854,11 @@ export class EditorShell extends Entity {
         return;
       }
       const movesBranch = selected.has(node.id) && !ancestorMoved && movementDelta != null;
-      const resizesBranch = selected.has(node.id) && !ancestorResized && resizeDelta !== undefined;
+      const resizesBranch =
+        resizeRoots.has(node.id) && !ancestorResized && resizeDelta !== undefined;
       let localMatrix = node.transform;
       if (resizesBranch) {
-        const resized = resizeLocalMatrix(parentMatrix, localMatrix, resizeDelta);
+        const resized = resolveResizePreviewLocalMatrix(parentMatrix, localMatrix, resizeDelta);
         if (!resized.ok) {
           this.reportRenderErrorOnce({
             code:
@@ -1038,46 +972,32 @@ export class EditorShell extends Entity {
       return;
     }
     if (visual !== null && visual.resize === undefined) return;
-    let start = this.resizeStart;
-    if (start === null) {
+    let interaction = this.resizeInteraction;
+    if (interaction === null) {
       try {
         const result = this.ports.beginResizeInteraction();
         if (!result.ok) return;
-        start = result.value;
+        const captured = captureResizeInteraction(result.value);
+        if (!captured.ok) return;
+        interaction = captured.value;
       } catch {
         return;
       }
     }
-    if (start.handles.length !== 8) return;
-    const resize = visual?.resize;
-    const handles: ResizePoint[] = [];
-    for (const entry of start.handles) {
-      const point =
-        resize === undefined
-          ? entry.point
-          : transformResizePoint(resize.command.delta, entry.point);
-      if (point === null) return;
-      handles.push(point);
-    }
-    const bounds = resize?.bounds ?? start.bounds;
+    const overlay = interaction.overlay(visual?.resize);
+    if (overlay === null || overlay.handles.length !== 8) return;
+    const bounds = overlay.bounds;
     const width = bounds.maxX - bounds.minX;
     const height = bounds.maxY - bounds.minY;
-    if (![bounds.minX, bounds.minY, width, height].every(Number.isFinite)) return;
 
     renderer.save();
     renderer.setGlobalAlpha(1);
     renderer.beginPath();
     renderer.roundRect(bounds.minX, bounds.minY, width, height, 0);
     renderer.stroke('#2563eb', 1);
-    for (const point of handles) {
+    for (const handle of overlay.handles) {
       renderer.beginPath();
-      renderer.roundRect(
-        point.x - RESIZE_HANDLE_HALF_SIZE,
-        point.y - RESIZE_HANDLE_HALF_SIZE,
-        RESIZE_HANDLE_SIZE,
-        RESIZE_HANDLE_SIZE,
-        0,
-      );
+      renderer.roundRect(handle.x, handle.y, handle.width, handle.height, 0);
       renderer.fill('#ffffff');
       renderer.stroke('#2563eb', 1);
     }
@@ -1278,23 +1198,18 @@ export class EditorShell extends Entity {
       return;
     }
     if (resizeStartResult.ok) {
-      let handle: ResizeHandle | null;
-      try {
-        handle = hitResizeHandle(resizeStartResult.value.handles, sampled.value.pagePoint);
-      } catch {
-        this.rejectPointer(pointerId, {
-          code: 'interaction.coordinate-invalid',
-          path: '/resize/handles',
-        });
+      const currentRoute = () =>
+        this.pointerRouteVersion === routeVersion &&
+        this.selectionSession === null &&
+        this.resizeSession === null;
+      const captured = captureResizeInteraction(resizeStartResult.value, currentRoute);
+      if (!currentRoute()) return;
+      if (!captured.ok) {
+        this.rejectPointer(pointerId, captured.error);
         return;
       }
-      if (
-        this.pointerRouteVersion !== routeVersion ||
-        this.selectionSession !== null ||
-        this.resizeSession !== null
-      ) {
-        return;
-      }
+      const handle: ResizeHandle | null = captured.value.hit(sampled.value.pagePoint);
+      if (!currentRoute()) return;
       if (handle !== null) {
         const resizeSample: ResizePointerSample = Object.freeze({
           pointerId,
@@ -1303,7 +1218,7 @@ export class EditorShell extends Entity {
           altKey: native.altKey,
         });
         const begun = ResizeSelectionSession.begin(
-          resizeStartResult.value,
+          captured.value.start,
           handle,
           resizeSample,
           this.resizeProvider,
@@ -1321,7 +1236,7 @@ export class EditorShell extends Entity {
         }
         this.resizeSession = begun.value;
         this.resizePointerId = pointerId;
-        this.resizeStart = resizeStartResult.value;
+        this.resizeInteraction = captured.value;
         this.terminalInteraction = null;
         event.preventDefault();
         return;
@@ -1549,7 +1464,7 @@ export class EditorShell extends Entity {
     const terminal = expected.snapshot();
     this.resizeSession = null;
     this.resizePointerId = null;
-    this.resizeStart = null;
+    this.resizeInteraction = null;
     this.terminalInteraction = terminal.phase === 'terminal' ? terminal : null;
     return true;
   }

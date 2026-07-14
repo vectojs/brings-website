@@ -4,7 +4,6 @@ import type {
   NodeId,
   ResizeBounds,
   ResizeHandle,
-  ResizeHandlePosition,
   ResizePoint,
   Result,
   SelectionResizeProposal,
@@ -22,6 +21,7 @@ import type {
   SelectionGestureEffect,
   SelectionGestureVisual,
 } from './MarqueeSelectionSession';
+import { captureResizeInteraction } from './ResizeInteractionGeometry';
 
 const INTERRUPTED = Symbol('resize-session-interrupted');
 const IGNORE_EFFECT = Object.freeze({ kind: 'ignore' } as const);
@@ -116,51 +116,6 @@ function snapshotToken(
   return Object.freeze({
     documentRevision: guardedRead(() => token.documentRevision, guard),
     selectionGeneration: guardedRead(() => token.selectionGeneration, guard),
-  });
-}
-
-function snapshotHandles(
-  handles: readonly ResizeHandlePosition[],
-  guard?: SnapshotGuard,
-): readonly ResizeHandlePosition[] {
-  const length = guardedRead(() => handles.length, guard);
-  const detached: ResizeHandlePosition[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const source = guardedRead(() => handles[index]!, guard);
-    detached.push(
-      Object.freeze({
-        handle: guardedRead(() => source.handle, guard),
-        point: snapshotPoint(
-          guardedRead(() => source.point, guard),
-          guard,
-        ),
-      }),
-    );
-  }
-  return Object.freeze(detached);
-}
-
-function snapshotStart(
-  start: ResizeInteractionStart,
-  guard?: SnapshotGuard,
-): ResizeInteractionStart {
-  return Object.freeze({
-    token: snapshotToken(
-      guardedRead(() => start.token, guard),
-      guard,
-    ),
-    selection: snapshotSelection(
-      guardedRead(() => start.selection, guard),
-      guard,
-    ),
-    bounds: snapshotBounds(
-      guardedRead(() => start.bounds, guard),
-      guard,
-    ),
-    handles: snapshotHandles(
-      guardedRead(() => start.handles, guard),
-      guard,
-    ),
   });
 }
 
@@ -350,7 +305,9 @@ export class ResizeSelectionSession {
     _provider: ResizeProposalProvider,
   ): Result<ResizeSelectionSession> {
     try {
-      const capturedStart = snapshotStart(start);
+      const captured = captureResizeInteraction(start);
+      if (!captured.ok) return captured;
+      const capturedStart = captured.value.start;
       const capturedSample = snapshotSample(sample);
       if (!capturedStart.handles.some((entry) => entry.handle === handle)) {
         return failure(Object.freeze({ code: 'resize.handle', path: '/handle' }));
