@@ -162,6 +162,50 @@ test('owns one pointer, preserves arbitrary handle offset, and samples Shift/Alt
   });
 });
 
+test('rejects a foreign pointer before reading any of its remaining accessors', () => {
+  const interaction = start();
+  const fixture = providerFixture(interaction);
+  const session = begin(interaction, sample(4, 113, 73), fixture.provider);
+  let pagePointReads = 0;
+  let shiftReads = 0;
+  let altReads = 0;
+  const foreign = Object.defineProperties(
+    {},
+    {
+      pointerId: { value: 99 },
+      pagePoint: {
+        get() {
+          pagePointReads += 1;
+          throw new Error('foreign page point must stay unread');
+        },
+      },
+      shiftKey: {
+        get() {
+          shiftReads += 1;
+          return true;
+        },
+      },
+      altKey: {
+        get() {
+          altReads += 1;
+          return true;
+        },
+      },
+    },
+  ) as ResizePointerSample;
+
+  expect(session.update(foreign, fixture.provider)).toEqual({ kind: 'ignore' });
+  expect({ pagePointReads, shiftReads, altReads }).toEqual({
+    pagePointReads: 0,
+    shiftReads: 0,
+    altReads: 0,
+  });
+  expect(session.snapshot()).toMatchObject({ phase: 'resizing', pointerId: 4 });
+  expect(session.update(sample(4, 160, 120), fixture.provider)).toMatchObject({
+    kind: 'preview',
+  });
+});
+
 test('retains the last valid preview across singular samples and commits it once on finish', () => {
   const interaction = start();
   const fixture = providerFixture(interaction, [
@@ -202,6 +246,17 @@ test('does not commit identity on zero-motion finish and cancels only the owner 
     reason: 'pointercancel',
   });
   expect(cancelled.cancel({ kind: 'escape' })).toEqual({ kind: 'ignore' });
+});
+
+test('Escape directly discards one active resize session and ignores every late event', () => {
+  const interaction = start();
+  const fixture = providerFixture(interaction);
+  const session = begin(interaction, sample(12, 113, 73), fixture.provider);
+
+  expect(session.cancel({ kind: 'escape' })).toEqual({ kind: 'discard', reason: 'escape' });
+  expect(session.snapshot()).toMatchObject({ phase: 'terminal', terminalEffect: 'discard' });
+  expect(session.update(sample(12, 160, 120), fixture.provider)).toEqual({ kind: 'ignore' });
+  expect(session.finish(sample(12, 160, 120), fixture.provider)).toEqual({ kind: 'ignore' });
 });
 
 test('does not commit an identity proposal after returning a moved pointer to its origin', () => {

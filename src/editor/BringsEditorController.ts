@@ -528,10 +528,11 @@ export class BringsEditorController {
   }
 
   private captureResizeStart(start: ResizeInteractionStart): ResizeInteractionStart {
+    const token = start.token;
     return Object.freeze({
       token: Object.freeze({
-        documentRevision: start.token.documentRevision,
-        selectionGeneration: start.token.selectionGeneration,
+        documentRevision: token.documentRevision,
+        selectionGeneration: token.selectionGeneration,
       }),
       selection: freezeSelection(start.selection),
       bounds: freezeResizeBounds(start.bounds),
@@ -540,10 +541,11 @@ export class BringsEditorController {
   }
 
   private captureResizeProposal(proposal: ResizeInteractionProposal): ResizeInteractionProposal {
+    const token = proposal.token;
     return Object.freeze({
       token: Object.freeze({
-        documentRevision: proposal.token.documentRevision,
-        selectionGeneration: proposal.token.selectionGeneration,
+        documentRevision: token.documentRevision,
+        selectionGeneration: token.selectionGeneration,
       }),
       selection: freezeSelection(proposal.selection),
       input: freezeResizeInput(proposal.input),

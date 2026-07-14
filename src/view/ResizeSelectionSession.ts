@@ -174,6 +174,22 @@ function snapshotSample(sample: ResizePointerSample, guard?: SnapshotGuard): Res
   });
 }
 
+function snapshotOwnedSample(
+  sample: ResizePointerSample,
+  pointerId: number,
+  guard?: SnapshotGuard,
+): ResizePointerSample {
+  return Object.freeze({
+    pointerId,
+    pagePoint: snapshotPoint(
+      guardedRead(() => sample.pagePoint, guard),
+      guard,
+    ),
+    shiftKey: guardedRead(() => sample.shiftKey, guard),
+    altKey: guardedRead(() => sample.altKey, guard),
+  });
+}
+
 function snapshotMatrix(matrix: Matrix, guard?: SnapshotGuard): Matrix {
   return Object.freeze([
     guardedRead(() => matrix[0], guard),
@@ -421,9 +437,20 @@ export class ResizeSelectionSession {
     if (this.phase === 'terminal') return IGNORE_EFFECT;
     const version = this.stateVersion;
     const current = () => this.isCurrent(version);
+    let pointerId: number;
+    try {
+      pointerId = guardedRead(() => sample.pointerId, current);
+    } catch (error) {
+      if (error === INTERRUPTED) return IGNORE_EFFECT;
+      return this.markDiscard(
+        'error',
+        Object.freeze({ code: 'interaction.coordinate-invalid', path: '/resize/pointerId' }),
+      );
+    }
+    if (pointerId !== this.ownerPointerId) return IGNORE_EFFECT;
     let captured: ResizePointerSample;
     try {
-      captured = snapshotSample(sample, current);
+      captured = snapshotOwnedSample(sample, pointerId, current);
     } catch (error) {
       if (error === INTERRUPTED) return IGNORE_EFFECT;
       return this.markDiscard(
@@ -431,7 +458,6 @@ export class ResizeSelectionSession {
         Object.freeze({ code: 'interaction.coordinate-invalid', path: '/resize/sample' }),
       );
     }
-    if (captured.pointerId !== this.ownerPointerId) return IGNORE_EFFECT;
     this.currentSample = captured;
 
     const moved =

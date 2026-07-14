@@ -486,3 +486,36 @@ test('reports a resize commit failure once and preserves a newer reentrant previ
   expect(interpreter.apply({ kind: 'commit-resize', proposal })).toBe(false);
   expect(interpreter.visual).toEqual(newer);
 });
+
+test('contains a thrown resize commit, clears its preview once, and reports one stable error', () => {
+  const errors: BringsError[] = [];
+  let dirty = 0;
+  const durableRevision = 7;
+  const interpreter = new SelectionGestureInterpreter({
+    commitSelection: () => ({ ok: true, value: snapshot() }),
+    commitMove: () => ({ ok: true, value: snapshot() }),
+    commitResize: () => {
+      throw new Error('Core commit escaped');
+    },
+    reportInteractionError: (error) => errors.push(error),
+    markDirty: () => {
+      dirty += 1;
+    },
+  });
+  const proposal = resizeProposal();
+  interpreter.apply({
+    kind: 'preview',
+    visual: {
+      selection: proposal.selection,
+      marquee: null,
+      movementDelta: null,
+      resize: proposal.resize,
+    },
+  });
+
+  expect(interpreter.apply({ kind: 'commit-resize', proposal })).toBe(false);
+  expect(interpreter.visual).toBeNull();
+  expect(errors).toEqual([{ code: 'interaction.commit-threw', path: '/commitResize' }]);
+  expect(dirty).toBe(2);
+  expect(durableRevision).toBe(7);
+});

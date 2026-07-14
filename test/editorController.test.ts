@@ -1058,3 +1058,180 @@ test('leaves document, selection, and history byte-identical when resize executi
   expect(executed).toEqual(proposal.resize.command);
   expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
 });
+
+test('captures each resize start and proposal token object once before validating it', () => {
+  const controller = populatedController();
+  unwrap(controller.selectAt(20, 20));
+  const validStart = unwrap(controller.beginResizeInteraction());
+  const handle = validStart.handles.find((entry) => entry.handle === 'east');
+  if (handle === undefined) throw new Error('east fixture handle missing');
+  let startTokenReads = 0;
+  const changingStart = Object.defineProperties(
+    { ...validStart },
+    {
+      token: {
+        get() {
+          startTokenReads += 1;
+          return startTokenReads === 1
+            ? {
+                documentRevision: validStart.token.documentRevision,
+                selectionGeneration: validStart.token.selectionGeneration - 1,
+              }
+            : {
+                documentRevision: validStart.token.documentRevision - 1,
+                selectionGeneration: validStart.token.selectionGeneration,
+              };
+        },
+      },
+    },
+  ) as typeof validStart;
+  const input = {
+    handle: 'east',
+    startPoint: handle.point,
+    currentPoint: { x: handle.point.x + 20, y: handle.point.y },
+    preserveAspectRatio: false,
+    fromCenter: false,
+  } as const;
+
+  expect(controller.proposeResize({ start: changingStart, input })).toEqual({
+    ok: false,
+    error: { code: 'interaction.stale', path: '/interaction' },
+  });
+  expect(startTokenReads).toBe(1);
+
+  const proposal = unwrap(controller.proposeResize({ start: validStart, input }));
+  let proposalTokenReads = 0;
+  const changingProposal = Object.defineProperties(
+    { ...proposal },
+    {
+      token: {
+        get() {
+          proposalTokenReads += 1;
+          return proposalTokenReads === 1
+            ? {
+                documentRevision: proposal.token.documentRevision,
+                selectionGeneration: proposal.token.selectionGeneration - 1,
+              }
+            : {
+                documentRevision: proposal.token.documentRevision - 1,
+                selectionGeneration: proposal.token.selectionGeneration,
+              };
+        },
+      },
+    },
+  ) as typeof proposal;
+  const before = JSON.stringify(controller.debugInteractionState());
+
+  expect(controller.commitResize(changingProposal)).toEqual({
+    ok: false,
+    error: { code: 'interaction.stale', path: '/interaction' },
+  });
+  expect(proposalTokenReads).toBe(1);
+  expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
+});
+
+test('cannot synthesize a current resize token when its start accessor commits reentrantly', () => {
+  const controller = populatedController();
+  unwrap(controller.selectAt(20, 20));
+  const validStart = unwrap(controller.beginResizeInteraction());
+  const selectionStart = controller.beginSelectionInteraction();
+  const selectSecond = unwrap(
+    controller.proposePointSelection({
+      start: selectionStart,
+      point: pagePoint(110, 20),
+      mode: 'replace',
+    }),
+  ).proposal;
+  const handle = validStart.handles.find((entry) => entry.handle === 'east');
+  if (handle === undefined) throw new Error('east fixture handle missing');
+  let tokenReads = 0;
+  let reentered = false;
+  const reentrantStart = Object.defineProperties(
+    { ...validStart },
+    {
+      token: {
+        get() {
+          tokenReads += 1;
+          if (!reentered) {
+            reentered = true;
+            unwrap(controller.commitSelection(selectSecond));
+            return validStart.token;
+          }
+          return controller.beginSelectionInteraction().token;
+        },
+      },
+      selection: {
+        get() {
+          return controller.snapshot().selection;
+        },
+      },
+    },
+  ) as typeof validStart;
+
+  expect(
+    controller.proposeResize({
+      start: reentrantStart,
+      input: {
+        handle: 'east',
+        startPoint: handle.point,
+        currentPoint: { x: handle.point.x + 20, y: handle.point.y },
+        preserveAspectRatio: false,
+        fromCenter: false,
+      },
+    }),
+  ).toEqual({ ok: false, error: { code: 'interaction.stale', path: '/interaction' } });
+  expect(tokenReads).toBe(1);
+  expect(controller.snapshot().selection).toEqual({
+    nodeIds: [interactionIds.second],
+    activeNodeId: interactionIds.second,
+  });
+});
+
+test('keeps controller state byte-identical when resize execution throws', () => {
+  const thrown = new Error('test resize execute threw');
+  const controller = populatedController((input) => {
+    const created = populatedStore(input);
+    if (!created.ok) return created;
+    const store = created.value;
+    return {
+      ok: true,
+      value: {
+        snapshot: () => store.snapshot(),
+        setSelection: (selection) => store.setSelection(selection),
+        execute(command: DocumentCommandInput): Result<EditorSnapshot> {
+          if (command.kind === 'apply-transform-delta') throw thrown;
+          return store.execute(command);
+        },
+        undo: () => store.undo(),
+        redo: () => store.redo(),
+      },
+    };
+  });
+  unwrap(controller.selectAt(20, 20));
+  const start = unwrap(controller.beginResizeInteraction());
+  const handle = start.handles.find((entry) => entry.handle === 'east');
+  if (handle === undefined) throw new Error('east fixture handle missing');
+  const proposal = unwrap(
+    controller.proposeResize({
+      start,
+      input: {
+        handle: 'east',
+        startPoint: handle.point,
+        currentPoint: { x: handle.point.x + 20, y: handle.point.y },
+        preserveAspectRatio: false,
+        fromCenter: false,
+      },
+    }),
+  );
+  const before = JSON.stringify(controller.debugInteractionState());
+  let caught: unknown;
+
+  try {
+    controller.commitResize(proposal);
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBe(thrown);
+  expect(JSON.stringify(controller.debugInteractionState())).toBe(before);
+});

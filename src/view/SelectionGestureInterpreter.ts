@@ -307,23 +307,37 @@ export class SelectionGestureInterpreter {
       >;
       const proposal = guardedRead(() => commit.proposal, current);
       const hadVisual = this.currentVisual !== null;
-      const result =
-        kind === 'commit-selection'
-          ? this.ports.commitSelection(proposal as SelectionProposal)
-          : kind === 'commit-move'
-            ? this.ports.commitMove({
-                proposal: proposal as SelectionProposal,
-                delta: guardedRead(
-                  () => (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>).delta,
-                  current,
-                ),
-              })
-            : (this.ports.commitResize?.(
-                snapshotResizeProposal(proposal as ResizeInteractionProposal, current),
-              ) ?? {
-                ok: false,
-                error: { code: 'interaction.resize-unavailable', path: '/commitResize' },
-              });
+      let result: Result<EditorSnapshot>;
+      try {
+        result =
+          kind === 'commit-selection'
+            ? this.ports.commitSelection(proposal as SelectionProposal)
+            : kind === 'commit-move'
+              ? this.ports.commitMove({
+                  proposal: proposal as SelectionProposal,
+                  delta: guardedRead(
+                    () =>
+                      (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>).delta,
+                    current,
+                  ),
+                })
+              : (this.ports.commitResize?.(
+                  snapshotResizeProposal(proposal as ResizeInteractionProposal, current),
+                ) ?? {
+                  ok: false,
+                  error: { code: 'interaction.resize-unavailable', path: '/commitResize' },
+                });
+      } catch (error) {
+        if (error === INTERRUPTED) return false;
+        if (kind !== 'commit-resize') throw error;
+        const commitError = Object.freeze({
+          code: 'interaction.commit-threw',
+          path: '/commitResize',
+        });
+        if (current() && hadVisual) this.clearVisual();
+        this.ports.reportInteractionError(commitError);
+        return false;
+      }
       const ok = result.ok;
       if (!ok) {
         const sourceError = (result as Readonly<{ ok: false; error: BringsError }>).error;
