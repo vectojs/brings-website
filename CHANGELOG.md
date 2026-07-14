@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added exact intersection marquee selection, dynamic Shift union, Shift-click
+  toggle, selected-object movement, and Escape/`pointercancel` rollback through
+  branded VectoJS logical/page coordinates. Read-only frozen diagnostics now
+  cover Chromium, Firefox, WebKit, high-DPR rendering, and CDP page-scale input;
+  CDP scale is tested as coordinate emulation rather than Ctrl+/- semantic zoom.
 - Extended first-time Pages domain activation polling to three minutes and
   accepted activation returned by the final allowed status refresh.
 - Added VMT-routed Delete and Backspace selection deletion as one undoable Core

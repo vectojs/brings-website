@@ -5,13 +5,26 @@ import {
   type IRenderer,
   type VectoJSEvent,
 } from '@vectojs/core';
-import type { EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
+import type { BringsError, EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
+import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
+import type {
+  SelectionInteractionStart,
+  SelectionProposal,
+  SelectionProposalProvider,
+} from '../editor/selectionInteraction';
 import { type EditorLayout, resolveEditorLayout } from './layout';
 import {
   type EditorShortcutAction,
   isNativeEditorTarget,
   resolveEditorShortcut,
 } from './editorShortcuts';
+import {
+  MarqueeSelectionSession,
+  type SelectionGestureSessionSnapshot,
+  type SelectionGestureVisual,
+  type SelectionPointerSample,
+} from './MarqueeSelectionSession';
+import { SelectionGestureInterpreter } from './SelectionGestureInterpreter';
 
 export type DrawerSide = 'left' | 'right';
 
@@ -64,62 +77,181 @@ class EditorRegion extends Entity {
 
 export type CreationTool = 'frame' | 'rectangle';
 type CanvasTool = 'select' | CreationTool;
-type DragPreview = Readonly<{ deltaX: number; deltaY: number }>;
-type DragSession = Readonly<{ startX: number; startY: number }>;
+
+type NativePointerSnapshot = Readonly<{
+  pointerId: number;
+  button: number;
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}>;
+
+type NativePointerSnapshotResult =
+  | Readonly<{ ok: true; value: NativePointerSnapshot }>
+  | Readonly<{ ok: false; error: BringsError; pointerId: number | null }>;
+
+/** Fresh JSON-safe diagnostic state exposed only through the debug reader. */
+export type EditorInteractionSnapshot = Readonly<{
+  phase: 'idle' | SelectionGestureSessionSnapshot['phase'];
+  terminalEffect: SelectionGestureSessionSnapshot['terminalEffect'];
+  pointerId: number | null;
+  shiftKey: boolean | null;
+  start: SelectionGestureSessionSnapshot['start'] | null;
+  current: SelectionGestureSessionSnapshot['current'] | null;
+  visual: SelectionGestureVisual | null;
+}>;
+
+function pointerInvalid(path: string, pointerId: number | null): NativePointerSnapshotResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'interaction.pointer-invalid', path }),
+    pointerId,
+  });
+}
+
+function snapshotPosition(
+  position: SelectionGestureSessionSnapshot['start'],
+): SelectionGestureSessionSnapshot['start'] {
+  return Object.freeze({
+    viewport: Object.freeze({ x: position.viewport.x, y: position.viewport.y }),
+    page: Object.freeze({ x: position.page.x, y: position.page.y }),
+  });
+}
+
+function snapshotSession(
+  session: SelectionGestureSessionSnapshot,
+): SelectionGestureSessionSnapshot {
+  return Object.freeze({
+    phase: session.phase,
+    terminalEffect: session.terminalEffect,
+    pointerId: session.pointerId,
+    shiftKey: session.shiftKey,
+    start: snapshotPosition(session.start),
+    current: snapshotPosition(session.current),
+  });
+}
+
+function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGestureVisual | null {
+  if (visual === null) return null;
+  const marquee = visual.marquee;
+  const movementDelta = visual.movementDelta;
+  return Object.freeze({
+    selection: Object.freeze({
+      nodeIds: Object.freeze([...visual.selection.nodeIds]),
+      activeNodeId: visual.selection.activeNodeId,
+    }),
+    marquee:
+      marquee === null
+        ? null
+        : Object.freeze({
+            x: marquee.x,
+            y: marquee.y,
+            width: marquee.width,
+            height: marquee.height,
+          }),
+    movementDelta:
+      movementDelta === null
+        ? null
+        : (Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta),
+  });
+}
 
 export interface EditorShellPorts {
   readonly documentSnapshot?: () => EditorSnapshot;
   readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
-  readonly selectAt?: (x: number, y: number) => Result<EditorSnapshot>;
-  readonly moveSelectionBy?: (deltaX: number, deltaY: number) => Result<EditorSnapshot>;
+  readonly beginSelectionInteraction?: () => SelectionInteractionStart;
+  readonly proposePointSelection?: SelectionProposalProvider['point'];
+  readonly proposeAreaSelection?: SelectionProposalProvider['area'];
+  readonly commitSelection?: (proposal: SelectionProposal) => Result<EditorSnapshot>;
+  readonly commitMove?: (
+    input: Readonly<{
+      proposal: SelectionProposal;
+      delta: PageDelta;
+    }>,
+  ) => Result<EditorSnapshot>;
+  readonly reportInteractionError?: (error: BringsError) => void;
   readonly runHistory?: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
   readonly deleteSelection?: () => Result<EditorSnapshot>;
 }
 
-const DEFAULT_EDITOR_SHELL_PORTS: Required<EditorShellPorts> = {
-  documentSnapshot: () => ({
-    document: {
-      id: '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['id'],
-      revision: 0,
-      name: 'Untitled',
-      pageOrder: [],
-      activePageId:
-        '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['activePageId'],
-      pages: [],
-      nodes: [],
-    },
-    selection: { nodeIds: [], activeNodeId: null },
-    undoDepth: 0,
-    redoDepth: 0,
-  }),
-  createAt: () => ({
-    ok: false,
-    error: { code: 'shape.unavailable', path: '/' },
-  }),
-  selectAt: () => ({
-    ok: false,
-    error: { code: 'selection.unavailable', path: '/' },
-  }),
-  moveSelectionBy: () => ({
-    ok: false,
-    error: { code: 'transform.unavailable', path: '/' },
-  }),
-  runHistory: () => ({
-    ok: false,
-    error: { code: 'history.unavailable', path: '/' },
-  }),
-  deleteSelection: () => ({
-    ok: false,
-    error: { code: 'selection.delete-unavailable', path: '/' },
-  }),
+type ResolvedEditorShellPorts = Readonly<{
+  documentSnapshot: () => EditorSnapshot;
+  createAt: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
+  beginSelectionInteraction: () => SelectionInteractionStart;
+  proposePointSelection: SelectionProposalProvider['point'];
+  proposeAreaSelection: SelectionProposalProvider['area'];
+  commitSelection: (proposal: SelectionProposal) => Result<EditorSnapshot>;
+  commitMove: (
+    input: Readonly<{
+      proposal: SelectionProposal;
+      delta: PageDelta;
+    }>,
+  ) => Result<EditorSnapshot>;
+  reportInteractionError: (error: BringsError) => void;
+  runHistory: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
+  deleteSelection: () => Result<EditorSnapshot>;
+}>;
+
+const DEFAULT_DOCUMENT_SNAPSHOT = (): EditorSnapshot => ({
+  document: {
+    id: '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['id'],
+    revision: 0,
+    name: 'Untitled',
+    pageOrder: [],
+    activePageId:
+      '00000000-0000-4000-8000-000000000000' as EditorSnapshot['document']['activePageId'],
+    pages: [],
+    nodes: [],
+  },
+  selection: { nodeIds: [], activeNodeId: null },
+  undoDepth: 0,
+  redoDepth: 0,
+});
+
+function unavailable(code: string): Result<never> {
+  return { ok: false, error: { code, path: '/' } };
+}
+
+const DEFAULT_EDITOR_SHELL_PORTS: Omit<
+  ResolvedEditorShellPorts,
+  'documentSnapshot' | 'beginSelectionInteraction'
+> = {
+  createAt: () => unavailable('shape.unavailable'),
+  proposePointSelection: () => unavailable('selection.unavailable'),
+  proposeAreaSelection: () => unavailable('selection.unavailable'),
+  commitSelection: () => unavailable('selection.unavailable'),
+  commitMove: () => unavailable('transform.unavailable'),
+  reportInteractionError: () => undefined,
+  runHistory: () => unavailable('history.unavailable'),
+  deleteSelection: () => unavailable('selection.delete-unavailable'),
 };
 
-function resolveEditorShellPorts(ports: EditorShellPorts): Required<EditorShellPorts> {
+function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPorts {
+  const documentSnapshot = ports.documentSnapshot ?? DEFAULT_DOCUMENT_SNAPSHOT;
   return {
-    documentSnapshot: ports.documentSnapshot ?? DEFAULT_EDITOR_SHELL_PORTS.documentSnapshot,
+    documentSnapshot,
     createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
-    selectAt: ports.selectAt ?? DEFAULT_EDITOR_SHELL_PORTS.selectAt,
-    moveSelectionBy: ports.moveSelectionBy ?? DEFAULT_EDITOR_SHELL_PORTS.moveSelectionBy,
+    beginSelectionInteraction:
+      ports.beginSelectionInteraction ??
+      (() => {
+        const snapshot = documentSnapshot();
+        return {
+          token: { documentRevision: snapshot.document.revision, selectionGeneration: 0 },
+          selection: {
+            nodeIds: [...snapshot.selection.nodeIds],
+            activeNodeId: snapshot.selection.activeNodeId,
+          },
+        };
+      }),
+    proposePointSelection:
+      ports.proposePointSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposePointSelection,
+    proposeAreaSelection:
+      ports.proposeAreaSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposeAreaSelection,
+    commitSelection: ports.commitSelection ?? DEFAULT_EDITOR_SHELL_PORTS.commitSelection,
+    commitMove: ports.commitMove ?? DEFAULT_EDITOR_SHELL_PORTS.commitMove,
+    reportInteractionError:
+      ports.reportInteractionError ?? DEFAULT_EDITOR_SHELL_PORTS.reportInteractionError,
     runHistory: ports.runHistory ?? DEFAULT_EDITOR_SHELL_PORTS.runHistory,
     deleteSelection: ports.deleteSelection ?? DEFAULT_EDITOR_SHELL_PORTS.deleteSelection,
   };
@@ -307,14 +439,29 @@ export class EditorShell extends Entity {
   });
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
-  private dragSession: DragSession | null = null;
-  private dragPreview: DragPreview | null = null;
+  private selectionSession: MarqueeSelectionSession | null = null;
+  private selectionPointerId: number | null = null;
+  private terminalInteraction: SelectionGestureSessionSnapshot | null = null;
+  private pointerRouteVersion = 0;
+  private readonly quarantinedPointerIds = new Set<number>();
   private layout: EditorLayout;
-  private readonly ports: Required<EditorShellPorts>;
+  private readonly ports: ResolvedEditorShellPorts;
+  private readonly selectionProvider: SelectionProposalProvider;
+  private readonly selectionInterpreter: SelectionGestureInterpreter;
 
   public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
     super('brings-editor-shell');
     this.ports = resolveEditorShellPorts(ports);
+    this.selectionProvider = {
+      point: (start, point, mode) => this.ports.proposePointSelection(start, point, mode),
+      area: (start, rect, mode) => this.ports.proposeAreaSelection(start, rect, mode),
+    };
+    this.selectionInterpreter = new SelectionGestureInterpreter({
+      commitSelection: (proposal) => this.ports.commitSelection(proposal),
+      commitMove: (input) => this.ports.commitMove(input),
+      reportInteractionError: (error) => this.ports.reportInteractionError(error),
+      markDirty: () => this.scene?.markDirty(),
+    });
     this.interactive = true;
     this.add(this.toolbar);
     this.add(this.layers);
@@ -339,6 +486,32 @@ export class EditorShell extends Entity {
   /** True while the narrow-screen shell supports editing tools. */
   public get authoringEnabled(): boolean {
     return this.width >= 600;
+  }
+
+  /** Read a fresh detached interaction snapshot without exposing mutation controls. */
+  public interactionSnapshot(): EditorInteractionSnapshot {
+    const source = this.selectionSession?.snapshot() ?? this.terminalInteraction;
+    if (source === null) {
+      return Object.freeze({
+        phase: 'idle',
+        terminalEffect: null,
+        pointerId: null,
+        shiftKey: null,
+        start: null,
+        current: null,
+        visual: null,
+      });
+    }
+    const session = snapshotSession(source);
+    return Object.freeze({
+      phase: session.phase,
+      terminalEffect: session.terminalEffect,
+      pointerId: session.pointerId,
+      shiftKey: session.shiftKey,
+      start: session.start,
+      current: session.current,
+      visual: snapshotVisual(this.selectionInterpreter.visual),
+    });
   }
 
   public openDrawer(side: DrawerSide): boolean {
@@ -451,13 +624,20 @@ export class EditorShell extends Entity {
   private renderDocument(renderer: IRenderer, originX: number, originY: number): void {
     const snapshot = this.ports.documentSnapshot();
     const document = snapshot.document;
-    const selected = new Set(snapshot.selection.nodeIds);
+    const visual = this.selectionInterpreter.visual;
+    const selected = new Set((visual?.selection ?? snapshot.selection).nodeIds);
+    const movementDelta = visual?.movementDelta;
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
-    const renderNode = (node: SceneNode, parentX: number, parentY: number): void => {
+    const renderNode = (
+      node: SceneNode,
+      parentX: number,
+      parentY: number,
+      ancestorMoved: boolean,
+    ): void => {
       if (!node.visible) return;
-      const preview = selected.has(node.id) ? this.dragPreview : null;
-      const x = parentX + node.transform[4] + (preview?.deltaX ?? 0);
-      const y = parentY + node.transform[5] + (preview?.deltaY ?? 0);
+      const movesBranch = selected.has(node.id) && !ancestorMoved && movementDelta != null;
+      const x = parentX + node.transform[4] + (movesBranch ? (movementDelta?.x ?? 0) : 0);
+      const y = parentY + node.transform[5] + (movesBranch ? (movementDelta?.y ?? 0) : 0);
       if (node.type === 'frame' || node.type === 'rectangle') {
         renderer.save();
         renderer.setGlobalAlpha(node.opacity);
@@ -476,7 +656,7 @@ export class EditorShell extends Entity {
       if (node.type === 'frame' || node.type === 'group') {
         for (const childId of node.childIds) {
           const child = nodes.get(childId);
-          if (child !== undefined) renderNode(child, x, y);
+          if (child !== undefined) renderNode(child, x, y, ancestorMoved || movesBranch);
         }
       }
     };
@@ -486,62 +666,297 @@ export class EditorShell extends Entity {
     renderer.translate(originX, originY);
     for (const rootId of activePage.rootNodeIds) {
       const root = nodes.get(rootId);
-      if (root !== undefined) renderNode(root, 0, 0);
+      if (root !== undefined) renderNode(root, 0, 0, false);
+    }
+    if (visual?.marquee !== null && visual?.marquee !== undefined) {
+      const source = visual.marquee;
+      const x = Math.min(source.x, source.x + source.width);
+      const y = Math.min(source.y, source.y + source.height);
+      const width = Math.abs(source.width);
+      const height = Math.abs(source.height);
+      renderer.save();
+      renderer.setGlobalAlpha(1);
+      renderer.beginPath();
+      renderer.roundRect(x, y, width, height, 0);
+      renderer.fill('rgba(37, 99, 235, 0.12)');
+      renderer.stroke('#2563eb', 1);
+      renderer.restore();
     }
     renderer.restore();
   }
 
   private routeCanvasPointer(event: VectoJSEvent): void {
-    if (!this.authoringEnabled) return;
-    const x = event.localX ?? 0;
-    const y = event.localY ?? 0;
+    const routeVersion = ++this.pointerRouteVersion;
+    const captured = this.snapshotPointerEvent(event);
+    if (this.pointerRouteVersion !== routeVersion) return;
+    if (!captured.ok) {
+      this.rejectInvalidNativePointer(event, captured);
+      return;
+    }
+    const native = captured.value;
+    const pointerId = native.pointerId;
+    if (this.quarantinedPointerIds.has(pointerId)) {
+      if (event.type === 'pointerup' || event.type === 'pointercancel') {
+        this.quarantinedPointerIds.delete(pointerId);
+      }
+      return;
+    }
 
     if (event.type === 'pointercancel') {
-      this.clearDragPreview();
+      const session = this.selectionSession;
+      if (session === null || this.selectionPointerId !== pointerId) return;
+      const effect = session.cancel({ kind: 'pointercancel', pointerId });
+      this.closeSelectionSession(session);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      return;
+    }
+
+    if (event.type === 'pointerdown') {
+      this.routeCanvasPointerDown(event, native, routeVersion);
+      return;
+    }
+    const session = this.selectionSession;
+    if (session === null || this.selectionPointerId !== pointerId) return;
+
+    const sampled = this.selectionSample(event, native);
+    if (!sampled.ok) {
+      const effect = session.cancel({ kind: 'error', error: sampled.error });
+      this.closeSelectionSession(session);
+      if (event.type !== 'pointerup') this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
       return;
     }
     if (event.type === 'pointermove') {
-      if (this.dragSession === null) return;
-      this.dragPreview = {
-        deltaX: x - this.dragSession.startX,
-        deltaY: y - this.dragSession.startY,
-      };
-      this.scene?.markDirty();
+      const effect = session.update(sampled.value, this.selectionProvider);
+      if (this.selectionSession !== session) return;
+      if (effect.kind === 'discard') {
+        this.closeSelectionSession(session);
+        this.quarantinedPointerIds.add(pointerId);
+      }
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
       return;
     }
     if (event.type === 'pointerup') {
-      if (this.dragSession === null) return;
-      const deltaX = x - this.dragSession.startX;
-      const deltaY = y - this.dragSession.startY;
-      this.clearDragPreview();
-      if (deltaX !== 0 || deltaY !== 0) this.ports.moveSelectionBy(deltaX, deltaY);
-      this.scene?.markDirty();
+      const effect = session.finish(sampled.value, this.selectionProvider);
+      if (this.selectionSession !== session) return;
+      this.closeSelectionSession(session);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+    }
+  }
+
+  private routeCanvasPointerDown(
+    event: VectoJSEvent,
+    native: Readonly<{
+      pointerId: number;
+      button: number;
+      shiftKey: boolean;
+      altKey: boolean;
+      ctrlKey: boolean;
+      metaKey: boolean;
+    }>,
+    routeVersion: number,
+  ): void {
+    if (!this.authoringEnabled) return;
+    const pointerId = native.pointerId;
+    if (this.selectionSession !== null) {
+      if (this.selectionPointerId !== pointerId) this.quarantinedPointerIds.add(pointerId);
       return;
     }
-    if (event.type !== 'pointerdown') return;
+    const supported = native.button === 0 && !native.altKey && !native.ctrlKey && !native.metaKey;
+    if (!supported) {
+      this.quarantinedPointerIds.add(pointerId);
+      return;
+    }
+    const sampled = this.selectionSample(event, native);
+    if (!sampled.ok) {
+      this.rejectPointer(pointerId, sampled.error);
+      return;
+    }
 
     if (this.activeTool !== 'select') {
-      const result = this.ports.createAt(this.activeTool, x, y);
+      const result = this.ports.createAt(
+        this.activeTool,
+        sampled.value.pagePoint.x,
+        sampled.value.pagePoint.y,
+      );
       if (result.ok) this.scene?.markDirty();
       return;
     }
 
-    const result = this.ports.selectAt(x, y);
-    if (!result.ok) return;
-    this.dragSession =
-      result.value.selection.nodeIds.length === 0 ? null : { startX: x, startY: y };
-    this.dragPreview = null;
-    this.scene?.markDirty();
+    let start: SelectionInteractionStart;
+    try {
+      start = this.ports.beginSelectionInteraction();
+    } catch {
+      if (this.pointerRouteVersion !== routeVersion || this.selectionSession !== null) return;
+      this.rejectPointer(pointerId, {
+        code: 'interaction.begin-threw',
+        path: '/beginSelectionInteraction',
+      });
+      return;
+    }
+    if (this.pointerRouteVersion !== routeVersion || this.selectionSession !== null) return;
+    const begun = MarqueeSelectionSession.begin(start, sampled.value, this.selectionProvider);
+    if (this.pointerRouteVersion !== routeVersion || this.selectionSession !== null) return;
+    if (!begun.ok) {
+      this.rejectPointer(pointerId, begun.error);
+      return;
+    }
+    this.selectionSession = begun.value;
+    this.selectionPointerId = pointerId;
+    this.terminalInteraction = null;
+    event.preventDefault();
   }
 
-  private clearDragPreview(): void {
-    if (this.dragSession === null && this.dragPreview === null) return;
-    this.dragSession = null;
-    this.dragPreview = null;
-    this.scene?.markDirty();
+  private snapshotPointerEvent(event: VectoJSEvent): NativePointerSnapshotResult {
+    let source:
+      | {
+          readonly pointerId?: number;
+          readonly button?: number;
+          readonly shiftKey?: boolean;
+          readonly altKey?: boolean;
+          readonly ctrlKey?: boolean;
+          readonly metaKey?: boolean;
+        }
+      | undefined;
+    try {
+      source = event.nativeEvent as typeof source;
+    } catch {
+      return pointerInvalid('/nativeEvent', null);
+    }
+
+    let pointerId: number | undefined;
+    try {
+      pointerId = source?.pointerId;
+    } catch {
+      return pointerInvalid('/nativeEvent/pointerId', null);
+    }
+    if (pointerId === undefined || !Number.isFinite(pointerId)) {
+      return pointerInvalid('/nativeEvent/pointerId', null);
+    }
+
+    let button: number | undefined;
+    let shiftKey: boolean | undefined;
+    let altKey: boolean | undefined;
+    let ctrlKey: boolean | undefined;
+    let metaKey: boolean | undefined;
+    try {
+      button = source?.button;
+    } catch {
+      return pointerInvalid('/nativeEvent/button', pointerId);
+    }
+    try {
+      shiftKey = source?.shiftKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/shiftKey', pointerId);
+    }
+    try {
+      altKey = source?.altKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/altKey', pointerId);
+    }
+    try {
+      ctrlKey = source?.ctrlKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/ctrlKey', pointerId);
+    }
+    try {
+      metaKey = source?.metaKey;
+    } catch {
+      return pointerInvalid('/nativeEvent/metaKey', pointerId);
+    }
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        pointerId,
+        button: button ?? 0,
+        shiftKey: shiftKey ?? false,
+        altKey: altKey ?? false,
+        ctrlKey: ctrlKey ?? false,
+        metaKey: metaKey ?? false,
+      }),
+    });
+  }
+
+  private rejectInvalidNativePointer(
+    event: VectoJSEvent,
+    failure: Extract<NativePointerSnapshotResult, { ok: false }>,
+  ): void {
+    const pointerId = failure.pointerId;
+    if (pointerId === null) {
+      this.ports.reportInteractionError(failure.error);
+      return;
+    }
+    const terminal = event.type === 'pointerup' || event.type === 'pointercancel';
+    if (this.quarantinedPointerIds.has(pointerId)) {
+      if (terminal) this.quarantinedPointerIds.delete(pointerId);
+      return;
+    }
+
+    const session = this.selectionSession;
+    if (session !== null && this.selectionPointerId === pointerId) {
+      const effect = session.cancel({ kind: 'error', error: failure.error });
+      this.closeSelectionSession(session);
+      if (!terminal) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      return;
+    }
+
+    if (!terminal) this.quarantinedPointerIds.add(pointerId);
+    this.ports.reportInteractionError(failure.error);
+  }
+
+  private selectionSample(
+    event: VectoJSEvent,
+    native: Readonly<{ pointerId: number; shiftKey: boolean }>,
+  ): Result<SelectionPointerSample> {
+    const localX = event.localX;
+    const localY = event.localY;
+    const viewport = viewportPoint(localX ?? Number.NaN, localY ?? Number.NaN);
+    if (!viewport.ok) return viewport;
+    const page = viewportToPagePoint(viewport.value);
+    if (!page.ok) return page;
+    return {
+      ok: true,
+      value: {
+        pointerId: native.pointerId,
+        viewportPoint: viewport.value,
+        pagePoint: page.value,
+        shiftKey: native.shiftKey,
+      },
+    };
+  }
+
+  private rejectPointer(pointerId: number, error: BringsError): void {
+    this.quarantinedPointerIds.add(pointerId);
+    this.ports.reportInteractionError(error);
+  }
+
+  private closeSelectionSession(expected: MarqueeSelectionSession): boolean {
+    if (this.selectionSession !== expected) return false;
+    const terminal = expected.snapshot();
+    this.selectionSession = null;
+    this.selectionPointerId = null;
+    this.terminalInteraction = terminal.phase === 'terminal' ? snapshotSession(terminal) : null;
+    return true;
   }
 
   private routeEditorShortcut(event: VectoJSEvent): void {
+    if (event.key === 'Escape' && this.selectionSession !== null) {
+      const session = this.selectionSession;
+      const pointerId = this.selectionPointerId;
+      const effect = session.cancel({ kind: 'escape' });
+      this.closeSelectionSession(session);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const action = resolveEditorShortcut(event);
     if (action === null || this.shouldYieldNativeEditor(event)) return;
 
