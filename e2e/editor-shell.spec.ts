@@ -136,6 +136,42 @@ function multiplyAffine(left: readonly number[], right: readonly number[]): read
   ];
 }
 
+/**
+ * Reads the black-box canvas raster around one handle. The 8px handle currently
+ * has a 7px white fill span and a 9px span after its centered 1px stroke.
+ */
+async function readResizeHandleLogicalGeometry(
+  page: Page,
+  point: Readonly<{ x: number; y: number }>,
+): Promise<number | null> {
+  return page.locator('canvas').evaluate((element, { x, y }) => {
+    if (!(element instanceof HTMLCanvasElement)) return null;
+    const context = element.getContext('2d');
+    if (context === null) return null;
+    const dpr = window.devicePixelRatio;
+    const sampleY = Math.round(y * dpr);
+    const background = context.getImageData(Math.round((x + 12) * dpr), sampleY, 1, 1).data;
+    const differs = (sampleX: number): boolean => {
+      const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
+      return [0, 1, 2].some(
+        (channel) => Math.abs((pixel[channel] ?? 0) - (background[channel] ?? 0)) > 8,
+      );
+    };
+    const minimum = Math.round((x - 12) * dpr);
+    const maximum = Math.round((x + 12) * dpr);
+    const painted: number[] = [];
+    const filled: number[] = [];
+    for (let sampleX = minimum; sampleX <= maximum; sampleX += 1) {
+      if (differs(sampleX)) painted.push(sampleX);
+      const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
+      if ([0, 1, 2].every((channel) => (pixel[channel] ?? 0) > 250)) filled.push(sampleX);
+    }
+    const run = (samples: readonly number[]): number =>
+      samples.length === 0 ? 0 : ((samples.at(-1) ?? 0) - (samples[0] ?? 0) + 1) / dpr;
+    return (run(painted) + run(filled)) / 2;
+  }, point);
+}
+
 test('projects one named Brings application shell', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('canvas')).toHaveCount(1);
@@ -994,45 +1030,15 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   await page.getByRole('button', { name: /Select/ }).click();
   await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
   await expect.poll(async () => (await readDebug(page)).snapshot.selection.nodeIds.length).toBe(1);
-  const readVisualGeometry = () =>
-    page.evaluate(
-      ({ x, y }) => {
-        const canvas = document.querySelector('canvas');
-        const context = canvas?.getContext('2d');
-        if (canvas === null || context === null) return null;
-        const dpr = window.devicePixelRatio;
-        const sampleY = Math.round(y * dpr);
-        const background = context.getImageData(Math.round((x + 12) * dpr), sampleY, 1, 1).data;
-        const differs = (sampleX: number): boolean => {
-          const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
-          return [0, 1, 2].some(
-            (channel) => Math.abs((pixel[channel] ?? 0) - (background[channel] ?? 0)) > 8,
-          );
-        };
-        const minimum = Math.round((x - 12) * dpr);
-        const maximum = Math.round((x + 12) * dpr);
-        const painted: number[] = [];
-        const filled: number[] = [];
-        for (let sampleX = minimum; sampleX <= maximum; sampleX += 1) {
-          if (differs(sampleX)) painted.push(sampleX);
-          const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
-          if ([0, 1, 2].every((channel) => (pixel[channel] ?? 0) > 250)) filled.push(sampleX);
-        }
-        const run = (samples: readonly number[]): number =>
-          samples.length === 0 ? 0 : ((samples.at(-1) ?? 0) - (samples[0] ?? 0) + 1) / dpr;
-        return {
-          geometry: (run(painted) + run(filled)) / 2,
-          canvasWidth: canvas.width,
-          canvasHeight: canvas.height,
-          dpr,
-          background: [...background],
-          center: [...context.getImageData(Math.round(x * dpr), sampleY, 1, 1).data],
-        };
-      },
-      { x: bounds.x + 500, y: bounds.y + 423 },
-    );
-  // The centered 1px stroke expands the 8px fill geometry to a 9px painted span.
-  await expect.poll(async () => (await readVisualGeometry())?.geometry ?? 0).toBeCloseTo(8, 0);
+  await expect
+    .poll(
+      async () =>
+        (await readResizeHandleLogicalGeometry(page, {
+          x: bounds.x + 500,
+          y: bounds.y + 423,
+        })) ?? 0,
+    )
+    .toBeCloseTo(8, 0);
 
   const resizeAt = async (offset: number): Promise<void> => {
     await page.mouse.move((bounds.x + 500 + offset) * pageScale, (bounds.y + 420) * pageScale);
@@ -1069,6 +1075,7 @@ test('previews and commits one Core-backed corner resize through the projected c
   const destination = await projectedPoint(page, { x: 540, y: 450 });
 
   await page.mouse.move(handle.x, handle.y);
+  const traceBeforeResize = (await readDebug(page)).trace.length;
   await page.mouse.down();
   await page.mouse.move(destination.x, destination.y, { steps: 4 });
 
@@ -1098,11 +1105,15 @@ test('previews and commits one Core-backed corner resize through the projected c
     expect(bounds?.maxY).toBeCloseTo(450, 10);
   }
   expect(preview.snapshot).toEqual(before);
-  expect(
-    preview.trace.some(
-      (entry) => entry.type === 'pointermove' && entry.targetId === 'brings-canvas-region',
-    ),
-  ).toBe(true);
+  const resizeTrace = preview.trace
+    .slice(traceBeforeResize)
+    .filter((entry) => entry.type === 'pointerdown' || entry.type === 'pointermove');
+  expect(resizeTrace[0]).toMatchObject({
+    type: 'pointerdown',
+    targetId: 'brings-canvas-region',
+  });
+  expect(resizeTrace.filter((entry) => entry.type === 'pointermove')).not.toHaveLength(0);
+  expect(resizeTrace.every((entry) => entry.targetId === 'brings-canvas-region')).toBe(true);
 
   const delta = preview.interaction.visual?.resize?.command.delta;
   expect(delta).toHaveLength(6);
@@ -1220,8 +1231,33 @@ test('samples edge-resize Shift and Alt modifiers dynamically', async ({ page })
   await page.keyboard.down('Shift');
   await page.mouse.move(north.x, north.y - 34);
   const finalPreview = await readDebug(page);
-  const finalDelta = finalPreview.interaction.visual?.resize?.command.delta;
-  expect(finalPreview.interaction).toMatchObject({ shiftKey: true, altKey: true });
+  const finalResize = finalPreview.interaction.visual?.resize;
+  const finalDelta = finalResize?.command.delta;
+  expect(finalPreview.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'north',
+    shiftKey: true,
+    altKey: true,
+    resizeStart: { x: 300, y: 120 },
+    resizeCurrent: { x: 300, y: 86 },
+    anchor: { x: 300, y: 270 },
+    visual: {
+      selection: { nodeIds: [frame.id], activeNodeId: frame.id },
+      resize: {
+        handle: 'north',
+        anchor: { x: 300, y: 270 },
+        command: { kind: 'apply-transform-delta', nodeIds: [frame.id] },
+      },
+    },
+  });
+  expect(finalResize?.scaleX).toBeCloseTo(finalResize?.scaleY ?? Number.NaN, 10);
+  expect(finalResize?.scaleX).toBeGreaterThan(1);
+  for (const bounds of [finalPreview.interaction.bounds, finalResize?.bounds]) {
+    expect(bounds?.minX).toBeCloseTo(54.6666666667, 8);
+    expect(bounds?.minY).toBeCloseTo(86, 8);
+    expect(bounds?.maxX).toBeCloseTo(545.3333333333, 8);
+    expect(bounds?.maxY).toBeCloseTo(454, 8);
+  }
   expect(finalPreview.snapshot).toEqual(before);
   await page.mouse.up();
   await page.keyboard.up('Alt');
@@ -1234,7 +1270,11 @@ test('samples edge-resize Shift and Alt modifiers dynamically', async ({ page })
     selection: { nodeIds: [frame.id], activeNodeId: frame.id },
     undoDepth: before.undoDepth + 1,
   });
-  expect(finalDelta).toHaveLength(6);
+  if (finalDelta === undefined) throw new Error('Final edge resize did not expose its command.');
+  expectNumbersClose(
+    committed.snapshot.document.nodes.find((node) => node.id === frame.id)?.transform,
+    multiplyAffine(finalDelta, frame.transform),
+  );
 });
 
 test('commits signed anchor crossing with the exact last preview matrix', async ({ page }) => {
@@ -1379,6 +1419,26 @@ test('discards resize on Escape, pointercancel, and a narrow responsive transiti
     visual: null,
   });
   expect(escaped.snapshot).toEqual(durable);
+  const escapedPointerId = escaped.interaction.pointerId;
+  if (escapedPointerId === null) throw new Error('The escaped resize has no pointer identifier.');
+  await page.getByRole('region', { name: 'Design canvas' }).evaluate(
+    (element, input) => {
+      element.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: input.x,
+          clientY: input.y,
+          pointerId: input.pointerId,
+        }),
+      );
+    },
+    { x: southEast.x, y: southEast.y, pointerId: escapedPointerId },
+  );
+  const afterLateDown = await readDebug(page);
+  expect(afterLateDown.interaction).toEqual(escaped.interaction);
+  expect(afterLateDown.snapshot).toEqual(durable);
   await page.mouse.up();
   const afterEscape = await readDebug(page);
   expect(afterEscape.snapshot).toEqual(durable);
