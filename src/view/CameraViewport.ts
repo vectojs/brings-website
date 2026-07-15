@@ -17,6 +17,7 @@ export type CameraViewport = Readonly<{
   viewportPointAt: (point: CameraPoint) => CameraPoint;
   panBySceneDelta: (delta: CameraPoint) => CameraViewport;
   zoomAtViewportPoint: (point: CameraPoint, deltaY: number) => CameraViewport;
+  zoomByFactorAtViewportPoint: (point: CameraPoint, factor: number) => CameraViewport;
 }>;
 
 const MIN_ZOOM = 0.05;
@@ -121,6 +122,21 @@ export function createCameraViewport(
       zoom,
     });
   };
+  const zoomByFactorAtViewportPoint = (point: CameraPoint, factor: number): CameraViewport => {
+    if (!Number.isFinite(factor) || factor <= 0) {
+      throw new TypeError('Camera zoom factor must be a positive finite number.');
+    }
+    const anchor = finitePoint(point, 'Zoom anchor');
+    const pageAnchor = pagePointAt(anchor);
+    const zoom = clampZoom(state.zoom * factor);
+    return createCameraViewport(size, {
+      center: {
+        x: pageAnchor.x - (anchor.x - center.x) / zoom,
+        y: pageAnchor.y - (anchor.y - center.y) / zoom,
+      },
+      zoom,
+    });
+  };
 
   return Object.freeze({
     state,
@@ -128,5 +144,6 @@ export function createCameraViewport(
     viewportPointAt,
     panBySceneDelta,
     zoomAtViewportPoint,
+    zoomByFactorAtViewportPoint,
   });
 }

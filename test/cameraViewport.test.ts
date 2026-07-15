@@ -67,3 +67,18 @@ test('keeps the page point below the pointer fixed while clamping zoom', () => {
   expect(value.zoomAtViewportPoint(pointer, 100_000).state.zoom).toBe(0.05);
   expect(value.zoomAtViewportPoint(pointer, -100_000).state.zoom).toBe(64);
 });
+
+test('zooms by an explicit toolbar factor while preserving the viewport anchor', () => {
+  const camera = createCameraViewport({ width: 800, height: 600 });
+  const anchor = { x: 240, y: 130 };
+  const before = camera.pagePointAt(anchor);
+  const zoomed = camera.zoomByFactorAtViewportPoint(anchor, 1.2);
+
+  expect(zoomed.state.zoom).toBeCloseTo(1.2);
+  const after = zoomed.pagePointAt(anchor);
+  expect(after.x).toBeCloseTo(before.x);
+  expect(after.y).toBeCloseTo(before.y);
+  expect(() => camera.zoomByFactorAtViewportPoint(anchor, 0)).toThrow(
+    'Camera zoom factor must be a positive finite number.',
+  );
+});

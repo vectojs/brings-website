@@ -72,17 +72,24 @@ type BrowserTraceEntry = Readonly<{
   defaultPrevented: boolean;
 }>;
 
+type BrowserCamera = Readonly<{
+  center: Readonly<{ x: number; y: number }>;
+  zoom: number;
+}>;
+
 type BrowserDebugApi = Readonly<{
   snapshot: () => BrowserDebugSnapshot;
   interaction: () => BrowserInteraction;
   interactionErrors: () => readonly Readonly<{ code: string; path: string }>[];
   trace: () => readonly BrowserTraceEntry[];
+  camera: () => BrowserCamera;
 }>;
 
 async function readDebug(page: Page): Promise<
   Readonly<{
     snapshot: BrowserDebugSnapshot;
     interaction: BrowserInteraction;
+    camera: BrowserCamera;
     interactionErrors: readonly Readonly<{ code: string; path: string }>[];
     trace: readonly BrowserTraceEntry[];
   }>
@@ -92,6 +99,7 @@ async function readDebug(page: Page): Promise<
     return {
       snapshot: debug.snapshot(),
       interaction: debug.interaction(),
+      camera: debug.camera(),
       interactionErrors: debug.interactionErrors(),
       trace: debug.trace(),
     };
@@ -244,6 +252,50 @@ test('loads the headless DevTools model only for debug sessions', async ({ page 
       }),
     )
     .toEqual({ revision: 0, pageName: 'Page 1' });
+});
+
+test('routes wheel zoom and Space drag through the canvas camera without mutating the document', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  const bounds = await canvas.boundingBox();
+  if (bounds === null) throw new Error('Design canvas is not projected.');
+  const before = await readDebug(page);
+  const wheelPrevented = await canvas.evaluate(
+    (element, point) => {
+      const event = new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        clientX: point.x,
+        clientY: point.y,
+        deltaY: -100,
+        ctrlKey: true,
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    },
+    { x: bounds.x + 300, y: bounds.y + 220 },
+  );
+  expect(wheelPrevented).toBe(true);
+  await expect.poll(async () => (await readDebug(page)).camera.zoom).toBeGreaterThan(1);
+
+  await canvas.focus();
+  await page.keyboard.down(' ');
+  await page.mouse.move(bounds.x + 300, bounds.y + 220);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + 324, bounds.y + 205);
+  await page.mouse.up();
+  await page.keyboard.up(' ');
+
+  const after = await readDebug(page);
+  expect(after.snapshot).toEqual(before.snapshot);
+  expect(after.camera.center).not.toEqual(before.camera.center);
+  expect(after.interaction.phase).toBe('idle');
+  expect(after.interactionErrors).toEqual([]);
 });
 
 test('does not project closed compact drawers over the design canvas', async ({ page }) => {
