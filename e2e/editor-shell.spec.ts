@@ -6,7 +6,10 @@ type BrowserDebugSnapshot = Readonly<{
     nodes: readonly Readonly<{
       id: string;
       type: string;
+      parentId: string | null;
       transform: readonly number[];
+      width?: number;
+      height?: number;
     }>[];
   }>;
   selection: Readonly<{ nodeIds: readonly string[]; activeNodeId: string | null }>;
@@ -15,10 +18,13 @@ type BrowserDebugSnapshot = Readonly<{
 }>;
 
 type BrowserInteraction = Readonly<{
-  phase: 'idle' | 'pending' | 'marquee' | 'moving' | 'terminal';
-  terminalEffect: 'commit-selection' | 'commit-move' | 'discard' | null;
+  phase: 'idle' | 'pending' | 'marquee' | 'moving' | 'resizing' | 'terminal';
+  terminalEffect: 'commit-selection' | 'commit-move' | 'commit-resize' | 'discard' | null;
   pointerId: number | null;
   shiftKey: boolean | null;
+  altKey?: boolean | null;
+  handle?:
+    'north-west' | 'north' | 'north-east' | 'east' | 'south-east' | 'south' | 'south-west' | 'west';
   start: Readonly<{
     viewport: Readonly<{ x: number; y: number }>;
     page: Readonly<{ x: number; y: number }>;
@@ -27,10 +33,26 @@ type BrowserInteraction = Readonly<{
     viewport: Readonly<{ x: number; y: number }>;
     page: Readonly<{ x: number; y: number }>;
   }> | null;
+  resizeStart?: Readonly<{ x: number; y: number }>;
+  resizeCurrent?: Readonly<{ x: number; y: number }>;
+  anchor?: Readonly<{ x: number; y: number }> | null;
+  bounds?: Readonly<{ minX: number; minY: number; maxX: number; maxY: number }>;
   visual: Readonly<{
     selection: Readonly<{ nodeIds: readonly string[]; activeNodeId: string | null }>;
     marquee: Readonly<{ x: number; y: number; width: number; height: number }> | null;
     movementDelta: Readonly<{ x: number; y: number }> | null;
+    resize?: Readonly<{
+      handle: NonNullable<BrowserInteraction['handle']>;
+      anchor: Readonly<{ x: number; y: number }>;
+      scaleX: number;
+      scaleY: number;
+      bounds: Readonly<{ minX: number; minY: number; maxX: number; maxY: number }>;
+      command: Readonly<{
+        kind: 'apply-transform-delta';
+        nodeIds: readonly string[];
+        delta: readonly number[];
+      }>;
+    }>;
   }> | null;
 }>;
 
@@ -65,6 +87,95 @@ async function readDebug(page: Page): Promise<
       trace: debug.trace(),
     };
   });
+}
+
+async function projectedPoint(
+  page: Page,
+  point: Readonly<{ x: number; y: number }>,
+): Promise<Readonly<{ x: number; y: number }>> {
+  const bounds = await page.getByRole('region', { name: 'Design canvas' }).boundingBox();
+  if (bounds === null) throw new Error('Design canvas is not projected.');
+  return { x: bounds.x + point.x, y: bounds.y + point.y };
+}
+
+async function createAndSelectFrame(
+  page: Page,
+  position: Readonly<{ x: number; y: number }>,
+): Promise<Readonly<{ id: string; transform: readonly number[] }>> {
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await canvas.click({ position });
+  await page.getByRole('button', { name: /Select/ }).click();
+  await canvas.click({ position: { x: position.x + 40, y: position.y + 40 } });
+  const snapshot = await readDebug(page);
+  const selected = snapshot.snapshot.document.nodes.find(
+    (node) => node.id === snapshot.snapshot.selection.activeNodeId,
+  );
+  if (selected === undefined) throw new Error('The created Frame was not selected.');
+  return selected;
+}
+
+function expectNumbersClose(
+  actual: readonly number[] | undefined,
+  expected: readonly number[],
+): void {
+  expect(actual).toHaveLength(expected.length);
+  for (const [index, expectedValue] of expected.entries()) {
+    expect(actual?.[index]).toBeCloseTo(expectedValue, 10);
+  }
+}
+
+function multiplyAffine(left: readonly number[], right: readonly number[]): readonly number[] {
+  return [
+    (left[0] ?? 0) * (right[0] ?? 0) + (left[2] ?? 0) * (right[1] ?? 0),
+    (left[1] ?? 0) * (right[0] ?? 0) + (left[3] ?? 0) * (right[1] ?? 0),
+    (left[0] ?? 0) * (right[2] ?? 0) + (left[2] ?? 0) * (right[3] ?? 0),
+    (left[1] ?? 0) * (right[2] ?? 0) + (left[3] ?? 0) * (right[3] ?? 0),
+    (left[0] ?? 0) * (right[4] ?? 0) + (left[2] ?? 0) * (right[5] ?? 0) + (left[4] ?? 0),
+    (left[1] ?? 0) * (right[4] ?? 0) + (left[3] ?? 0) * (right[5] ?? 0) + (left[5] ?? 0),
+  ];
+}
+
+/**
+ * Reads the black-box canvas raster around one handle. The 8px handle currently
+ * has a 7px white fill span and a 9px span after its centered 1px stroke.
+ */
+async function readResizeHandleLogicalGeometry(
+  page: Page,
+  point: Readonly<{ x: number; y: number }>,
+): Promise<Readonly<{ fillSpan: number; paintedSpan: number }> | null> {
+  return page.locator('canvas').evaluate((element, { x, y }) => {
+    if (!(element instanceof HTMLCanvasElement)) return null;
+    const context = element.getContext('2d');
+    if (context === null) return null;
+    const dpr = window.devicePixelRatio;
+    const sampleY = Math.round(y * dpr);
+    const background = context.getImageData(Math.round((x + 12) * dpr), sampleY, 1, 1).data;
+    const differs = (sampleX: number): boolean => {
+      const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
+      return [0, 1, 2].some(
+        (channel) => Math.abs((pixel[channel] ?? 0) - (background[channel] ?? 0)) > 8,
+      );
+    };
+    const center = Math.round(x * dpr);
+    const filled = (sampleX: number): boolean => {
+      const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
+      return [0, 1, 2].every((channel) => (pixel[channel] ?? 0) > 250);
+    };
+    const centerSpan = (matches: (sampleX: number) => boolean): number => {
+      if (!matches(center)) return 0;
+      const limit = Math.round(12 * dpr);
+      let minimum = center;
+      let maximum = center;
+      while (center - minimum < limit && matches(minimum - 1)) minimum -= 1;
+      while (maximum - center < limit && matches(maximum + 1)) maximum += 1;
+      return (maximum - minimum + 1) / dpr;
+    };
+    return {
+      fillSpan: centerSpan(filled),
+      paintedSpan: centerSpan(differs),
+    };
+  }, point);
 }
 
 test('projects one named Brings application shell', async ({ page }) => {
@@ -919,5 +1030,509 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
     terminalEffect: 'discard',
     visual: null,
   });
+
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await page.mouse.click((bounds.x + 100) * pageScale, (bounds.y + 120) * pageScale);
+  await page.getByRole('button', { name: /Select/ }).click();
+  await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
+  await expect.poll(async () => (await readDebug(page)).snapshot.selection.nodeIds.length).toBe(1);
+  const readHandleRaster = () =>
+    readResizeHandleLogicalGeometry(page, {
+      x: bounds.x + 500,
+      y: bounds.y + 423,
+    });
+  // A centered 1px stroke yields a 7px fill and 9px painted span around an 8px handle.
+  await expect.poll(async () => (await readHandleRaster())?.fillSpan ?? 0).toBeCloseTo(7, 0);
+  await expect.poll(async () => (await readHandleRaster())?.paintedSpan ?? 0).toBeCloseTo(9, 0);
+
+  const resizeAt = async (offset: number): Promise<void> => {
+    await page.mouse.move((bounds.x + 500 + offset) * pageScale, (bounds.y + 420) * pageScale);
+    await page.mouse.down();
+  };
+  await resizeAt(9.9);
+  const inclusiveHit = await readDebug(page);
+  expect(inclusiveHit.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'south-east',
+  });
+  expect(inclusiveHit.interaction.resizeStart?.x).toBeCloseTo(509.9, 3);
+  expect(inclusiveHit.interaction.resizeStart?.y).toBeCloseTo(420, 3);
+  expect(await page.evaluate(() => window.devicePixelRatio)).toBe(2);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+
+  await resizeAt(10.1);
+  expect((await readDebug(page)).interaction.phase).toBe('pending');
+  await page.mouse.up();
   await cdp.detach();
+});
+
+test('previews and commits one Core-backed corner resize through the projected canvas', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const frame = await createAndSelectFrame(page, { x: 100, y: 120 });
+  const before = (await readDebug(page)).snapshot;
+  const handle = await projectedPoint(page, { x: 500, y: 420 });
+  const destination = await projectedPoint(page, { x: 540, y: 450 });
+
+  await page.mouse.move(handle.x, handle.y);
+  const traceBeforeResize = (await readDebug(page)).trace.length;
+  await page.mouse.down();
+  await page.mouse.move(destination.x, destination.y, { steps: 4 });
+
+  const preview = await readDebug(page);
+  expect(preview.interaction).toMatchObject({
+    phase: 'resizing',
+    terminalEffect: null,
+    handle: 'south-east',
+    shiftKey: false,
+    altKey: false,
+    resizeStart: { x: 500, y: 420 },
+    resizeCurrent: { x: 540, y: 450 },
+    anchor: { x: 100, y: 120 },
+    visual: {
+      selection: { nodeIds: [frame.id], activeNodeId: frame.id },
+      resize: {
+        handle: 'south-east',
+        anchor: { x: 100, y: 120 },
+        command: { kind: 'apply-transform-delta', nodeIds: [frame.id] },
+      },
+    },
+  });
+  for (const bounds of [preview.interaction.bounds, preview.interaction.visual?.resize?.bounds]) {
+    expect(bounds?.minX).toBeCloseTo(100, 10);
+    expect(bounds?.minY).toBeCloseTo(120, 10);
+    expect(bounds?.maxX).toBeCloseTo(540, 10);
+    expect(bounds?.maxY).toBeCloseTo(450, 10);
+  }
+  expect(preview.snapshot).toEqual(before);
+  const resizeTrace = preview.trace
+    .slice(traceBeforeResize)
+    .filter((entry) => entry.type === 'pointerdown' || entry.type === 'pointermove');
+  expect(resizeTrace[0]).toMatchObject({
+    type: 'pointerdown',
+    targetId: 'brings-canvas-region',
+  });
+  expect(resizeTrace.filter((entry) => entry.type === 'pointermove')).not.toHaveLength(0);
+  expect(resizeTrace.every((entry) => entry.targetId === 'brings-canvas-region')).toBe(true);
+
+  const delta = preview.interaction.visual?.resize?.command.delta;
+  expect(delta).toHaveLength(6);
+  await page.mouse.up();
+
+  const committed = await readDebug(page);
+  const committedFrame = committed.snapshot.document.nodes.find((node) => node.id === frame.id);
+  expect(committed.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit-resize',
+    visual: null,
+  });
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    selection: before.selection,
+    undoDepth: before.undoDepth + 1,
+    redoDepth: 0,
+  });
+  expectNumbersClose(committedFrame?.transform, [1.1, 0, 0, 1.1, 100, 120]);
+  expectNumbersClose(delta, [1.1, 0, 0, 1.1, -10, -12]);
+
+  await page.keyboard.press('Control+z');
+  const undone = await readDebug(page);
+  expectNumbersClose(
+    undone.snapshot.document.nodes.find((node) => node.id === frame.id)?.transform,
+    frame.transform,
+  );
+  expect(undone.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 2 },
+    selection: before.selection,
+    undoDepth: before.undoDepth,
+    redoDepth: 1,
+  });
+
+  await page.keyboard.press('Control+Shift+z');
+  const redone = await readDebug(page);
+  expectNumbersClose(
+    redone.snapshot.document.nodes.find((node) => node.id === frame.id)?.transform,
+    committedFrame?.transform ?? [],
+  );
+  expect(redone.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 3 },
+    selection: before.selection,
+    undoDepth: before.undoDepth + 1,
+    redoDepth: 0,
+  });
+
+  const frozen = await page.evaluate(() => {
+    const interaction = Reflect.get(window, '__brings').interaction();
+    return {
+      interaction: Object.isFrozen(interaction),
+      bounds: Object.isFrozen(interaction.bounds),
+      json: JSON.parse(JSON.stringify(interaction)),
+    };
+  });
+  expect(frozen.interaction).toBe(true);
+  expect(frozen.bounds).toBe(true);
+  expect(frozen.json).toEqual(redone.interaction);
+});
+
+test('samples edge-resize Shift and Alt modifiers dynamically', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const frame = await createAndSelectFrame(page, { x: 100, y: 120 });
+  const before = (await readDebug(page)).snapshot;
+  const north = await projectedPoint(page, { x: 300, y: 120 });
+  await page.mouse.move(north.x, north.y);
+  await page.mouse.down();
+  await page.mouse.move(north.x, north.y - 30);
+
+  const unconstrained = await readDebug(page);
+  expect(unconstrained.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'north',
+    shiftKey: false,
+    altKey: false,
+    anchor: { x: 300, y: 420 },
+  });
+  expect(unconstrained.interaction.visual?.resize?.scaleX).toBeCloseTo(1, 10);
+  expect(unconstrained.interaction.visual?.resize?.scaleY).toBeGreaterThan(1);
+
+  await page.keyboard.down('Shift');
+  await page.mouse.move(north.x, north.y - 31);
+  const aspect = await readDebug(page);
+  expect(aspect.interaction).toMatchObject({ shiftKey: true, altKey: false });
+  expect(aspect.interaction.visual?.resize?.scaleX).toBeCloseTo(
+    aspect.interaction.visual?.resize?.scaleY ?? Number.NaN,
+    10,
+  );
+
+  await page.keyboard.down('Alt');
+  await page.mouse.move(north.x, north.y - 32);
+  const centeredAspect = await readDebug(page);
+  expect(centeredAspect.interaction).toMatchObject({
+    shiftKey: true,
+    altKey: true,
+    anchor: { x: 300, y: 270 },
+  });
+  expect(centeredAspect.interaction.visual?.resize?.scaleX).toBeCloseTo(
+    centeredAspect.interaction.visual?.resize?.scaleY ?? Number.NaN,
+    10,
+  );
+
+  await page.keyboard.up('Shift');
+  await page.mouse.move(north.x, north.y - 33);
+  const centered = await readDebug(page);
+  expect(centered.interaction).toMatchObject({ shiftKey: false, altKey: true });
+  expect(centered.interaction.visual?.resize?.scaleX).toBeCloseTo(1, 10);
+  expect(centered.interaction.visual?.resize?.scaleY).toBeGreaterThan(
+    unconstrained.interaction.visual?.resize?.scaleY ?? Number.POSITIVE_INFINITY,
+  );
+
+  await page.keyboard.down('Shift');
+  await page.mouse.move(north.x, north.y - 34);
+  const finalPreview = await readDebug(page);
+  const finalResize = finalPreview.interaction.visual?.resize;
+  const finalDelta = finalResize?.command.delta;
+  expect(finalPreview.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'north',
+    shiftKey: true,
+    altKey: true,
+    resizeStart: { x: 300, y: 120 },
+    resizeCurrent: { x: 300, y: 86 },
+    anchor: { x: 300, y: 270 },
+    visual: {
+      selection: { nodeIds: [frame.id], activeNodeId: frame.id },
+      resize: {
+        handle: 'north',
+        anchor: { x: 300, y: 270 },
+        command: { kind: 'apply-transform-delta', nodeIds: [frame.id] },
+      },
+    },
+  });
+  expect(finalResize?.scaleX).toBeCloseTo(finalResize?.scaleY ?? Number.NaN, 10);
+  expect(finalResize?.scaleX).toBeGreaterThan(1);
+  for (const bounds of [finalPreview.interaction.bounds, finalResize?.bounds]) {
+    expect(bounds?.minX).toBeCloseTo(54.6666666667, 8);
+    expect(bounds?.minY).toBeCloseTo(86, 8);
+    expect(bounds?.maxX).toBeCloseTo(545.3333333333, 8);
+    expect(bounds?.maxY).toBeCloseTo(454, 8);
+  }
+  expect(finalPreview.snapshot).toEqual(before);
+  await page.mouse.up();
+  await page.keyboard.up('Alt');
+  await page.keyboard.up('Shift');
+
+  const committed = await readDebug(page);
+  expect(committed.interaction.terminalEffect).toBe('commit-resize');
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    selection: { nodeIds: [frame.id], activeNodeId: frame.id },
+    undoDepth: before.undoDepth + 1,
+  });
+  if (finalDelta === undefined) throw new Error('Final edge resize did not expose its command.');
+  expectNumbersClose(
+    committed.snapshot.document.nodes.find((node) => node.id === frame.id)?.transform,
+    multiplyAffine(finalDelta, frame.transform),
+  );
+});
+
+test('commits signed anchor crossing with the exact last preview matrix', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const frame = await createAndSelectFrame(page, { x: 100, y: 120 });
+  const before = (await readDebug(page)).snapshot;
+  const northWest = await projectedPoint(page, { x: 100, y: 120 });
+  const crossed = await projectedPoint(page, { x: 540, y: 470 });
+  await page.mouse.move(northWest.x, northWest.y);
+  await page.mouse.down();
+  await page.mouse.move(crossed.x, crossed.y, { steps: 4 });
+
+  const preview = await readDebug(page);
+  const resize = preview.interaction.visual?.resize;
+  expect(preview.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'north-west',
+    anchor: { x: 500, y: 420 },
+  });
+  expect(resize?.scaleX).toBeLessThan(0);
+  expect(resize?.scaleY).toBeLessThan(0);
+  expect(preview.snapshot).toEqual(before);
+  const delta = resize?.command.delta;
+  if (delta === undefined) throw new Error('Signed resize did not expose its preview command.');
+  const expected = multiplyAffine(delta, frame.transform);
+
+  await page.mouse.up();
+  const committed = await readDebug(page);
+  expect(committed.interaction.terminalEffect).toBe('commit-resize');
+  expectNumbersClose(
+    committed.snapshot.document.nodes.find((node) => node.id === frame.id)?.transform,
+    expected,
+  );
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    selection: before.selection,
+    undoDepth: before.undoDepth + 1,
+  });
+});
+
+test('resizes an aggregate selection as one undo entry without touching its sibling', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 2000, height: 1000 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  for (const position of [
+    { x: 50, y: 100 },
+    { x: 550, y: 100 },
+    { x: 1050, y: 100 },
+  ]) {
+    await canvas.click({ position });
+  }
+  await page.getByRole('button', { name: /Select/ }).click();
+  await canvas.click({ position: { x: 100, y: 150 } });
+  await canvas.click({ position: { x: 600, y: 150 }, modifiers: ['Shift'] });
+
+  const before = (await readDebug(page)).snapshot;
+  const [firstId, secondId] = before.selection.nodeIds;
+  if (firstId === undefined || secondId === undefined) {
+    throw new Error('Two Frames were not selected for aggregate resize.');
+  }
+  const sibling = before.document.nodes.find(
+    (node) => node.type === 'frame' && !before.selection.nodeIds.includes(node.id),
+  );
+  if (sibling === undefined) throw new Error('The unselected sibling Frame was not created.');
+  const selectedBefore = before.document.nodes.filter((node) =>
+    before.selection.nodeIds.includes(node.id),
+  );
+  const southEast = await projectedPoint(page, { x: 950, y: 400 });
+  const destination = await projectedPoint(page, { x: 1000, y: 430 });
+  await page.mouse.move(southEast.x, southEast.y);
+  await page.mouse.down();
+  await page.mouse.move(destination.x, destination.y, { steps: 4 });
+
+  const preview = await readDebug(page);
+  expect(preview.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'south-east',
+    visual: {
+      selection: { nodeIds: [firstId, secondId], activeNodeId: secondId },
+      resize: { command: { nodeIds: [firstId, secondId] } },
+    },
+  });
+  expect(preview.snapshot).toEqual(before);
+  const delta = preview.interaction.visual?.resize?.command.delta;
+  if (delta === undefined) throw new Error('Aggregate resize did not expose its command.');
+  await page.mouse.up();
+
+  const committed = await readDebug(page);
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    selection: before.selection,
+    undoDepth: before.undoDepth + 1,
+    redoDepth: 0,
+  });
+  for (const node of selectedBefore) {
+    expectNumbersClose(
+      committed.snapshot.document.nodes.find((candidate) => candidate.id === node.id)?.transform,
+      multiplyAffine(delta, node.transform),
+    );
+  }
+  expect(committed.snapshot.document.nodes.find((node) => node.id === sibling.id)).toEqual(sibling);
+
+  await page.keyboard.press('Control+z');
+  const undone = await readDebug(page);
+  expect(undone.snapshot.document.nodes).toEqual(before.document.nodes);
+  expect(undone.snapshot).toMatchObject({
+    selection: before.selection,
+    undoDepth: before.undoDepth,
+    redoDepth: 1,
+  });
+});
+
+test('discards resize on Escape, pointercancel, and a narrow responsive transition', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  await createAndSelectFrame(page, { x: 100, y: 120 });
+  const durable = (await readDebug(page)).snapshot;
+  let southEast = await projectedPoint(page, { x: 500, y: 420 });
+  let destination = await projectedPoint(page, { x: 540, y: 450 });
+
+  await page.mouse.move(southEast.x, southEast.y);
+  await page.mouse.down();
+  await page.mouse.move(destination.x, destination.y, { steps: 3 });
+  const traceBeforeEscape = (await readDebug(page)).trace.length;
+  await page.keyboard.press('Escape');
+  const escaped = await readDebug(page);
+  expect(escaped.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+  expect(escaped.snapshot).toEqual(durable);
+  const escapedPointerId = escaped.interaction.pointerId;
+  if (escapedPointerId === null) throw new Error('The escaped resize has no pointer identifier.');
+  const traceBeforeQuarantinedDown = escaped.trace.length;
+  await page.getByRole('region', { name: 'Design canvas' }).evaluate(
+    (element, input) => {
+      element.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: input.x,
+          clientY: input.y,
+          pointerId: input.pointerId,
+        }),
+      );
+    },
+    { x: southEast.x, y: southEast.y, pointerId: escapedPointerId },
+  );
+  await expect
+    .poll(async () =>
+      (await readDebug(page)).trace
+        .slice(traceBeforeQuarantinedDown)
+        .filter((entry) => entry.type === 'pointerdown')
+        .map((entry) => ({ type: entry.type, targetId: entry.targetId })),
+    )
+    .toEqual([{ type: 'pointerdown', targetId: 'brings-canvas-region' }]);
+  const afterLateDown = await readDebug(page);
+  expect(afterLateDown.interaction).toEqual(escaped.interaction);
+  expect(afterLateDown.snapshot).toEqual(durable);
+  await page.mouse.up();
+  const afterEscape = await readDebug(page);
+  expect(afterEscape.snapshot).toEqual(durable);
+  expect(
+    afterEscape.trace
+      .slice(traceBeforeEscape)
+      .filter((entry) => entry.type === 'keydown' || entry.type === 'pointerup')
+      .map((entry) => ({ type: entry.type, defaultPrevented: entry.defaultPrevented })),
+  ).toEqual([
+    { type: 'keydown', defaultPrevented: true },
+    { type: 'pointerup', defaultPrevented: false },
+  ]);
+
+  await page.mouse.move(southEast.x, southEast.y);
+  await page.mouse.down();
+  expect((await readDebug(page)).interaction.phase).toBe('resizing');
+  await page.mouse.move(destination.x, destination.y, { steps: 3 });
+  const active = await readDebug(page);
+  const pointerId = active.interaction.pointerId;
+  if (pointerId === null) throw new Error('The resize session has no owner pointer.');
+  const traceBeforeCancel = active.trace.length;
+  await page.getByRole('region', { name: 'Design canvas' }).evaluate(
+    (element, input) => {
+      element.dispatchEvent(
+        new PointerEvent('pointercancel', {
+          bubbles: true,
+          cancelable: true,
+          clientX: input.x,
+          clientY: input.y,
+          pointerId: input.pointerId,
+        }),
+      );
+    },
+    { x: destination.x, y: destination.y, pointerId },
+  );
+  expect((await readDebug(page)).snapshot).toEqual(durable);
+  await page.mouse.up();
+  const afterCancel = await readDebug(page);
+  expect(afterCancel.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+  });
+  expect(afterCancel.snapshot).toEqual(durable);
+  expect(
+    afterCancel.trace
+      .slice(traceBeforeCancel)
+      .filter((entry) => entry.type === 'pointercancel' || entry.type === 'pointerup')
+      .map((entry) => ({ type: entry.type, defaultPrevented: entry.defaultPrevented })),
+  ).toEqual([
+    { type: 'pointercancel', defaultPrevented: true },
+    { type: 'pointerup', defaultPrevented: false },
+  ]);
+
+  // The mouse reuses its pointer identifier only after the quarantined terminal event.
+  await page.mouse.move(southEast.x, southEast.y);
+  await page.mouse.down();
+  expect((await readDebug(page)).interaction).toMatchObject({ phase: 'resizing', pointerId });
+  await page.mouse.move(destination.x, destination.y, { steps: 2 });
+
+  await page.setViewportSize({ width: 500, height: 900 });
+  await expect
+    .poll(async () => (await readDebug(page)).interaction)
+    .toMatchObject({ phase: 'terminal', terminalEffect: 'discard', visual: null });
+  expect((await readDebug(page)).snapshot).toEqual(durable);
+  await page.mouse.up();
+
+  const northWestNarrow = await projectedPoint(page, { x: 100, y: 120 });
+  await page.mouse.move(northWestNarrow.x, northWestNarrow.y);
+  await page.mouse.down();
+  expect((await readDebug(page)).interaction.phase).not.toBe('resizing');
+  await page.mouse.up();
+  expect((await readDebug(page)).snapshot).toEqual(durable);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByRole('group', { name: 'Properties' })).toBeVisible();
+  southEast = await projectedPoint(page, { x: 500, y: 420 });
+  await page.mouse.move(southEast.x, southEast.y);
+  await page.mouse.down();
+  await expect.poll(async () => (await readDebug(page)).interaction.phase).toBe('resizing');
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect((await readDebug(page)).snapshot).toEqual(durable);
 });

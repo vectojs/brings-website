@@ -2,6 +2,7 @@ import {
   createDocumentStore,
   hitTestPage,
   intersectPageRect,
+  prepareSelectionResize,
   resolveStructuralSelection,
   type BringsError,
   type BringsDocument,
@@ -10,6 +11,10 @@ import {
   type EditorSnapshot,
   type NodeId,
   type Result,
+  type ResizeBounds,
+  type ResizeHandlePosition,
+  type SelectionResizeProposal,
+  type SelectionResizeProposalInput,
   type StructuralSelection,
 } from '@vectojs/brings-core';
 import {
@@ -23,6 +28,8 @@ import {
 import type {
   AreaSelectionMode,
   PointSelectionMode,
+  ResizeInteractionProposal,
+  ResizeInteractionStart,
   SelectionInteractionStart,
   SelectionInteractionToken,
   SelectionProposal,
@@ -58,6 +65,82 @@ function sameSelection(left: StructuralSelection, right: StructuralSelection): b
     left.activeNodeId === right.activeNodeId &&
     left.nodeIds.length === right.nodeIds.length &&
     left.nodeIds.every((id, index) => id === right.nodeIds[index])
+  );
+}
+
+function freezeSelection(selection: StructuralSelection): StructuralSelection {
+  return Object.freeze({
+    nodeIds: Object.freeze([...selection.nodeIds]),
+    activeNodeId: selection.activeNodeId,
+  });
+}
+
+function freezeResizeBounds(bounds: ResizeBounds): ResizeBounds {
+  return Object.freeze({
+    minX: bounds.minX,
+    minY: bounds.minY,
+    maxX: bounds.maxX,
+    maxY: bounds.maxY,
+  });
+}
+
+function freezeResizeHandles(
+  handles: readonly ResizeHandlePosition[],
+): readonly ResizeHandlePosition[] {
+  return Object.freeze(
+    handles.map((entry) =>
+      Object.freeze({
+        handle: entry.handle,
+        point: Object.freeze({ x: entry.point.x, y: entry.point.y }),
+      }),
+    ),
+  );
+}
+
+function freezeResizeInput(input: SelectionResizeProposalInput): SelectionResizeProposalInput {
+  return Object.freeze({
+    handle: input.handle,
+    startPoint: Object.freeze({ x: input.startPoint.x, y: input.startPoint.y }),
+    currentPoint: Object.freeze({ x: input.currentPoint.x, y: input.currentPoint.y }),
+    preserveAspectRatio: input.preserveAspectRatio,
+    fromCenter: input.fromCenter,
+  });
+}
+
+function freezeResizeProposal(resize: SelectionResizeProposal): SelectionResizeProposal {
+  return Object.freeze({
+    handle: resize.handle,
+    anchor: Object.freeze({ x: resize.anchor.x, y: resize.anchor.y }),
+    scaleX: resize.scaleX,
+    scaleY: resize.scaleY,
+    bounds: freezeResizeBounds(resize.bounds),
+    command: Object.freeze({
+      kind: resize.command.kind,
+      nodeIds: Object.freeze([...resize.command.nodeIds]),
+      delta: Object.freeze([...resize.command.delta]) as typeof resize.command.delta,
+    }),
+  });
+}
+
+function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameResize(left: SelectionResizeProposal, right: SelectionResizeProposal): boolean {
+  return (
+    left.handle === right.handle &&
+    left.anchor.x === right.anchor.x &&
+    left.anchor.y === right.anchor.y &&
+    left.scaleX === right.scaleX &&
+    left.scaleY === right.scaleY &&
+    left.bounds.minX === right.bounds.minX &&
+    left.bounds.minY === right.bounds.minY &&
+    left.bounds.maxX === right.bounds.maxX &&
+    left.bounds.maxY === right.bounds.maxY &&
+    left.command.kind === right.command.kind &&
+    left.command.nodeIds.length === right.command.nodeIds.length &&
+    left.command.nodeIds.every((id, index) => id === right.command.nodeIds[index]) &&
+    sameNumbers(left.command.delta, right.command.delta)
   );
 }
 
@@ -116,6 +199,75 @@ export class BringsEditorController {
       },
       selection: cloneSelection(snapshot.selection),
     };
+  }
+
+  /** Capture immutable Core resize geometry for the current normalized selection. */
+  public beginResizeInteraction(): Result<ResizeInteractionStart> {
+    const snapshot = this.store.snapshot();
+    const prepared = prepareSelectionResize(snapshot.document, snapshot.selection);
+    if (!prepared.ok) return prepared;
+    return {
+      ok: true,
+      value: Object.freeze({
+        token: Object.freeze({
+          documentRevision: snapshot.document.revision,
+          selectionGeneration: this.selectionGeneration,
+        }),
+        selection: freezeSelection(prepared.value.selection),
+        bounds: freezeResizeBounds(prepared.value.bounds),
+        handles: freezeResizeHandles(prepared.value.handles),
+      }),
+    };
+  }
+
+  /** Ask Core for one pure resize proposal without mutating document history. */
+  public proposeResize(
+    input: Readonly<{
+      start: ResizeInteractionStart;
+      input: SelectionResizeProposalInput;
+    }>,
+  ): Result<ResizeInteractionProposal> {
+    const capturedStart = this.captureResizeStart(input.start);
+    const capturedInput = freezeResizeInput(input.input);
+    const valid = this.validateToken(capturedStart.token);
+    if (!valid.ok) return valid;
+    const snapshot = this.store.snapshot();
+    if (!sameSelection(snapshot.selection, capturedStart.selection)) {
+      return this.failure('interaction.selection-mismatch', '/selection');
+    }
+    const prepared = prepareSelectionResize(snapshot.document, capturedStart.selection);
+    if (!prepared.ok) return prepared;
+    const proposed = prepared.value.propose(capturedInput);
+    if (!proposed.ok) return proposed;
+    return {
+      ok: true,
+      value: Object.freeze({
+        token: capturedStart.token,
+        selection: freezeSelection(prepared.value.selection),
+        input: capturedInput,
+        resize: freezeResizeProposal(proposed.value),
+      }),
+    };
+  }
+
+  /** Validate and execute the exact final Core resize command as one history entry. */
+  public commitResize(proposal: ResizeInteractionProposal): Result<EditorSnapshot> {
+    const captured = this.captureResizeProposal(proposal);
+    const valid = this.validateToken(captured.token);
+    if (!valid.ok) return valid;
+    const before = this.store.snapshot();
+    if (!sameSelection(before.selection, captured.selection)) {
+      return this.failure('interaction.selection-mismatch', '/selection');
+    }
+    const prepared = prepareSelectionResize(before.document, captured.selection);
+    if (!prepared.ok) return prepared;
+    const expected = prepared.value.propose(captured.input);
+    if (!expected.ok) return expected;
+    if (!sameResize(expected.value, captured.resize)) {
+      return this.failure('interaction.resize-mismatch', '/resize');
+    }
+    const result = this.store.execute(captured.resize.command);
+    return this.finishOperation(before.selection, result);
   }
 
   /** Propose a normalized point selection without mutating the Core store. */
@@ -373,6 +525,32 @@ export class BringsEditorController {
       documentRevision: this.store.snapshot().document.revision,
       selectionGeneration: this.selectionGeneration,
     };
+  }
+
+  private captureResizeStart(start: ResizeInteractionStart): ResizeInteractionStart {
+    const token = start.token;
+    return Object.freeze({
+      token: Object.freeze({
+        documentRevision: token.documentRevision,
+        selectionGeneration: token.selectionGeneration,
+      }),
+      selection: freezeSelection(start.selection),
+      bounds: freezeResizeBounds(start.bounds),
+      handles: freezeResizeHandles(start.handles),
+    });
+  }
+
+  private captureResizeProposal(proposal: ResizeInteractionProposal): ResizeInteractionProposal {
+    const token = proposal.token;
+    return Object.freeze({
+      token: Object.freeze({
+        documentRevision: token.documentRevision,
+        selectionGeneration: token.selectionGeneration,
+      }),
+      selection: freezeSelection(proposal.selection),
+      input: freezeResizeInput(proposal.input),
+      resize: freezeResizeProposal(proposal.resize),
+    });
   }
 
   private validateToken(token: SelectionInteractionToken): Result<void> {

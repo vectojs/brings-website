@@ -4,6 +4,7 @@ import type {
   EditorSnapshot,
   NodeId,
   Result,
+  SelectionResizeProposal,
   StructuralSelection,
 } from '@vectojs/brings-core';
 import {
@@ -11,8 +12,10 @@ import {
   pageRectBetween,
   viewportPoint,
   viewportToPagePoint,
+  type PageDelta,
 } from '../src/editor/selectionCoordinates';
 import type { SelectionProposal } from '../src/editor/selectionInteraction';
+import type { ResizeInteractionProposal } from '../src/editor/selectionInteraction';
 import type {
   SelectionGestureEffect,
   SelectionGestureVisual,
@@ -157,7 +160,10 @@ test('commits a move through one object input and reports discard errors once', 
   const delta = unwrap(pageDeltaBetween(start, end));
   const next = proposal([first]);
 
-  state.interpreter.apply({ kind: 'preview', visual: { ...visual(), movementDelta: delta } });
+  state.interpreter.apply({
+    kind: 'preview',
+    visual: { selection: visual().selection, marquee: null, movementDelta: delta },
+  });
   expect(state.interpreter.apply({ kind: 'commit-move', proposal: next, delta })).toBe(true);
   expect(state.moveCommits).toEqual([{ proposal: next, delta }]);
   expect(state.dirtyCalls()).toBe(2);
@@ -188,9 +194,9 @@ test('treats node order, active identity, and null versus zero delta as visual s
   state.interpreter.apply({
     kind: 'preview',
     visual: {
-      ...base,
+      selection: base.selection,
       marquee: null,
-      movementDelta: { x: 0, y: 0 } as typeof base.movementDelta,
+      movementDelta: { x: 0, y: 0 } as PageDelta,
     },
   });
   state.interpreter.apply({
@@ -288,7 +294,7 @@ test('does not let an accessor-backed outer preview overwrite a reentrant previe
     },
   };
   state.interpreter.apply({ kind: 'preview', visual: visual([]) });
-  state.interpreter.apply({ kind: 'preview', visual: accessorVisual });
+  state.interpreter.apply({ kind: 'preview', visual: accessorVisual as SelectionGestureVisual });
 
   expect(state.interpreter.visual).toEqual(nested);
   expect(state.dirtyCalls()).toBe(2);
@@ -385,9 +391,131 @@ test('does not install an outer preview after its accessor commits Core reentran
     },
   };
 
-  state.interpreter.apply({ kind: 'preview', visual: accessorVisual });
+  state.interpreter.apply({ kind: 'preview', visual: accessorVisual as SelectionGestureVisual });
 
   expect(state.interpreter.visual).toBeNull();
   expect(state.selectionCommits).toEqual([proposal([second])]);
   expect(state.dirtyCalls()).toBe(1);
+});
+
+function resizeProposal(): ResizeInteractionProposal {
+  const resize: SelectionResizeProposal = {
+    handle: 'south-east',
+    anchor: { x: 10, y: 20 },
+    scaleX: 2,
+    scaleY: 3,
+    bounds: { minX: 10, minY: 20, maxX: 110, maxY: 170 },
+    command: {
+      kind: 'apply-transform-delta',
+      nodeIds: [first],
+      delta: [2, 0, 0, 3, -10, -40],
+    },
+  };
+  return {
+    token: { documentRevision: 3, selectionGeneration: 2 },
+    selection: selection([first]),
+    input: {
+      handle: 'south-east',
+      startPoint: { x: 60, y: 70 },
+      currentPoint: { x: 110, y: 170 },
+      preserveAspectRatio: false,
+      fromCenter: false,
+    },
+    resize,
+  };
+}
+
+test('owns one detached resize visual and routes its exact proposal through commit-resize', () => {
+  const commits: ResizeInteractionProposal[] = [];
+  let dirty = 0;
+  const interpreter = new SelectionGestureInterpreter({
+    commitSelection: () => ({ ok: true, value: snapshot() }),
+    commitMove: () => ({ ok: true, value: snapshot() }),
+    commitResize: (value) => {
+      commits.push(value);
+      return { ok: true, value: snapshot() };
+    },
+    reportInteractionError: () => undefined,
+    markDirty: () => {
+      dirty += 1;
+    },
+  });
+  const proposal = resizeProposal();
+  const mutable = {
+    selection: selection([first]),
+    marquee: null,
+    movementDelta: null,
+    resize: proposal.resize,
+  };
+
+  expect(interpreter.apply({ kind: 'preview', visual: mutable })).toBe(false);
+  (proposal.resize.command.delta as unknown as number[])[0] = 99;
+
+  expect(interpreter.visual?.resize?.command.delta[0]).toBe(2);
+  expect(Object.isFrozen(interpreter.visual?.resize?.command.delta)).toBe(true);
+  expect(interpreter.apply({ kind: 'commit-resize', proposal: resizeProposal() })).toBe(true);
+  expect(commits).toEqual([resizeProposal()]);
+  expect(interpreter.visual).toBeNull();
+  expect(dirty).toBe(2);
+});
+
+test('reports a resize commit failure once and preserves a newer reentrant preview', () => {
+  let interpreter!: SelectionGestureInterpreter;
+  const error = { code: 'interaction.stale', path: '/interaction' };
+  const newer = visual([second]);
+  interpreter = new SelectionGestureInterpreter({
+    commitSelection: () => ({ ok: true, value: snapshot() }),
+    commitMove: () => ({ ok: true, value: snapshot() }),
+    commitResize: () => ({ ok: false, error }),
+    reportInteractionError: () => {
+      interpreter.apply({ kind: 'preview', visual: newer });
+    },
+    markDirty: () => undefined,
+  });
+  const proposal = resizeProposal();
+  interpreter.apply({
+    kind: 'preview',
+    visual: {
+      selection: proposal.selection,
+      marquee: null,
+      movementDelta: null,
+      resize: proposal.resize,
+    },
+  });
+
+  expect(interpreter.apply({ kind: 'commit-resize', proposal })).toBe(false);
+  expect(interpreter.visual).toEqual(newer);
+});
+
+test('contains a thrown resize commit, clears its preview once, and reports one stable error', () => {
+  const errors: BringsError[] = [];
+  let dirty = 0;
+  const durableRevision = 7;
+  const interpreter = new SelectionGestureInterpreter({
+    commitSelection: () => ({ ok: true, value: snapshot() }),
+    commitMove: () => ({ ok: true, value: snapshot() }),
+    commitResize: () => {
+      throw new Error('Core commit escaped');
+    },
+    reportInteractionError: (error) => errors.push(error),
+    markDirty: () => {
+      dirty += 1;
+    },
+  });
+  const proposal = resizeProposal();
+  interpreter.apply({
+    kind: 'preview',
+    visual: {
+      selection: proposal.selection,
+      marquee: null,
+      movementDelta: null,
+      resize: proposal.resize,
+    },
+  });
+
+  expect(interpreter.apply({ kind: 'commit-resize', proposal })).toBe(false);
+  expect(interpreter.visual).toBeNull();
+  expect(errors).toEqual([{ code: 'interaction.commit-threw', path: '/commitResize' }]);
+  expect(dirty).toBe(2);
+  expect(durableRevision).toBe(7);
 });

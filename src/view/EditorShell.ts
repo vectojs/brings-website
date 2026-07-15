@@ -5,9 +5,22 @@ import {
   type IRenderer,
   type VectoJSEvent,
 } from '@vectojs/core';
-import type { BringsError, EditorSnapshot, Result, SceneNode } from '@vectojs/brings-core';
+import type {
+  BringsError,
+  EditorSnapshot,
+  Matrix,
+  ResizeBounds,
+  ResizeHandle,
+  ResizePoint,
+  Result,
+  SceneNode,
+  SelectionResizeProposal,
+} from '@vectojs/brings-core';
 import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
 import type {
+  ResizeInteractionProposal,
+  ResizeInteractionStart,
+  ResizeProposalProvider,
   SelectionInteractionStart,
   SelectionProposal,
   SelectionProposalProvider,
@@ -24,9 +37,47 @@ import {
   type SelectionGestureVisual,
   type SelectionPointerSample,
 } from './MarqueeSelectionSession';
+import {
+  type CapturedResizeInteraction,
+  captureResizeInteraction,
+  resolveResizePreviewLocalMatrix,
+} from './ResizeInteractionGeometry';
+import {
+  ResizeSelectionSession,
+  type ResizePointerSample,
+  type ResizeSelectionSessionSnapshot,
+} from './ResizeSelectionSession';
 import { SelectionGestureInterpreter } from './SelectionGestureInterpreter';
 
 export type DrawerSide = 'left' | 'right';
+
+const IDENTITY_MATRIX: Matrix = Object.freeze([1, 0, 0, 1, 0, 0]);
+
+function multiplyMatrices(left: Matrix, right: Matrix): Matrix | null {
+  const product = [
+    left[0] * right[0] + left[2] * right[1],
+    left[1] * right[0] + left[3] * right[1],
+    left[0] * right[2] + left[2] * right[3],
+    left[1] * right[2] + left[3] * right[3],
+    left[0] * right[4] + left[2] * right[5] + left[4],
+    left[1] * right[4] + left[3] * right[5] + left[5],
+  ];
+  return product.every(Number.isFinite) ? (Object.freeze(product) as Matrix) : null;
+}
+
+function moveDeltaInParentSpace(parent: Matrix, delta: PageDelta): PageDelta | null {
+  if (parent[1] !== 0 || parent[2] !== 0 || parent[0] === 0 || parent[3] === 0) return null;
+  const x = delta.x / parent[0];
+  const y = delta.y / parent[3];
+  return Number.isFinite(x) && Number.isFinite(y) ? (Object.freeze({ x, y }) as PageDelta) : null;
+}
+
+function applyAxisAlignedMatrix(renderer: IRenderer, matrix: Matrix): boolean {
+  if (matrix[1] !== 0 || matrix[2] !== 0) return false;
+  renderer.translate(matrix[4], matrix[5]);
+  renderer.scale(matrix[0], matrix[3]);
+  return true;
+}
 
 class EditorRegion extends Entity {
   private pointerHandler: ((event: VectoJSEvent) => void) | null = null;
@@ -87,13 +138,43 @@ type NativePointerSnapshot = Readonly<{
   metaKey: boolean;
 }>;
 
-type NativePointerSnapshotResult =
-  | Readonly<{ ok: true; value: NativePointerSnapshot }>
-  | Readonly<{ ok: false; error: BringsError; pointerId: number | null }>;
+type NativePointerSource = Readonly<{
+  pointerId?: number;
+  button?: number;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+}>;
 
-/** Fresh JSON-safe diagnostic state exposed only through the debug reader. */
-export type EditorInteractionSnapshot = Readonly<{
-  phase: 'idle' | SelectionGestureSessionSnapshot['phase'];
+type NativePointerFailure = Readonly<{
+  ok: false;
+  error: BringsError;
+  pointerId: number | null;
+}>;
+
+type NativePointerHeadResult =
+  | Readonly<{
+      ok: true;
+      value: Readonly<{ source: NativePointerSource; pointerId: number }>;
+    }>
+  | NativePointerFailure;
+
+type NativePointerSnapshotResult =
+  Readonly<{ ok: true; value: NativePointerSnapshot }> | NativePointerFailure;
+
+type IdleEditorInteractionSnapshot = Readonly<{
+  phase: 'idle';
+  terminalEffect: null;
+  pointerId: null;
+  shiftKey: null;
+  start: null;
+  current: null;
+  visual: null;
+}>;
+
+type SelectionEditorInteractionSnapshot = Readonly<{
+  phase: SelectionGestureSessionSnapshot['phase'];
   terminalEffect: SelectionGestureSessionSnapshot['terminalEffect'];
   pointerId: number | null;
   shiftKey: boolean | null;
@@ -102,7 +183,29 @@ export type EditorInteractionSnapshot = Readonly<{
   visual: SelectionGestureVisual | null;
 }>;
 
-function pointerInvalid(path: string, pointerId: number | null): NativePointerSnapshotResult {
+type ResizeEditorInteractionSnapshot = Readonly<{
+  phase: ResizeSelectionSessionSnapshot['phase'];
+  terminalEffect: ResizeSelectionSessionSnapshot['terminalEffect'];
+  pointerId: number;
+  handle: ResizeHandle;
+  shiftKey: boolean;
+  altKey: boolean;
+  start: null;
+  current: null;
+  resizeStart: ResizePoint;
+  resizeCurrent: ResizePoint;
+  anchor: ResizePoint | null;
+  bounds: ResizeBounds;
+  visual: SelectionGestureVisual | null;
+}>;
+
+/** Fresh JSON-safe diagnostic state exposed only through the debug reader. */
+export type EditorInteractionSnapshot =
+  | IdleEditorInteractionSnapshot
+  | SelectionEditorInteractionSnapshot
+  | ResizeEditorInteractionSnapshot;
+
+function pointerInvalid(path: string, pointerId: number | null): NativePointerFailure {
   return Object.freeze({
     ok: false,
     error: Object.freeze({ code: 'interaction.pointer-invalid', path }),
@@ -132,15 +235,71 @@ function snapshotSession(
   });
 }
 
+function snapshotResizeSession(
+  session: ResizeSelectionSessionSnapshot,
+  visual: SelectionGestureVisual | null,
+): ResizeEditorInteractionSnapshot {
+  return Object.freeze({
+    phase: session.phase,
+    terminalEffect: session.terminalEffect,
+    pointerId: session.pointerId,
+    handle: session.handle,
+    shiftKey: session.shiftKey,
+    altKey: session.altKey,
+    start: null,
+    current: null,
+    resizeStart: Object.freeze({ x: session.start.x, y: session.start.y }),
+    resizeCurrent: Object.freeze({ x: session.current.x, y: session.current.y }),
+    anchor:
+      session.anchor === null ? null : Object.freeze({ x: session.anchor.x, y: session.anchor.y }),
+    bounds: Object.freeze({
+      minX: session.bounds.minX,
+      minY: session.bounds.minY,
+      maxX: session.bounds.maxX,
+      maxY: session.bounds.maxY,
+    }),
+    visual: snapshotVisual(visual),
+  });
+}
+
 function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGestureVisual | null {
   if (visual === null) return null;
   const marquee = visual.marquee;
   const movementDelta = visual.movementDelta;
+  const resize = visual.resize;
+  const selection = Object.freeze({
+    nodeIds: Object.freeze([...visual.selection.nodeIds]),
+    activeNodeId: visual.selection.activeNodeId,
+  });
+  if (resize !== undefined) {
+    const detachedResize: SelectionResizeProposal = Object.freeze({
+      handle: resize.handle,
+      anchor: Object.freeze({ x: resize.anchor.x, y: resize.anchor.y }),
+      scaleX: resize.scaleX,
+      scaleY: resize.scaleY,
+      bounds: Object.freeze({ ...resize.bounds }),
+      command: Object.freeze({
+        kind: resize.command.kind,
+        nodeIds: Object.freeze([...resize.command.nodeIds]),
+        delta: Object.freeze([...resize.command.delta]) as Matrix,
+      }),
+    });
+    return Object.freeze({
+      selection,
+      marquee: null,
+      movementDelta: null,
+      resize: detachedResize,
+    });
+  }
+  if (movementDelta !== null) {
+    return Object.freeze({
+      selection,
+      marquee: null,
+      movementDelta: Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta,
+    });
+  }
   return Object.freeze({
-    selection: Object.freeze({
-      nodeIds: Object.freeze([...visual.selection.nodeIds]),
-      activeNodeId: visual.selection.activeNodeId,
-    }),
+    selection,
     marquee:
       marquee === null
         ? null
@@ -150,10 +309,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
             width: marquee.width,
             height: marquee.height,
           }),
-    movementDelta:
-      movementDelta === null
-        ? null
-        : (Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta),
+    movementDelta: null,
   });
 }
 
@@ -170,6 +326,14 @@ export interface EditorShellPorts {
       delta: PageDelta;
     }>,
   ) => Result<EditorSnapshot>;
+  readonly beginResizeInteraction?: () => Result<ResizeInteractionStart>;
+  readonly proposeResize?: (
+    input: Readonly<{
+      start: ResizeInteractionStart;
+      input: Parameters<ResizeProposalProvider['resize']>[1];
+    }>,
+  ) => Result<ResizeInteractionProposal>;
+  readonly commitResize?: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   readonly reportInteractionError?: (error: BringsError) => void;
   readonly runHistory?: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
   readonly deleteSelection?: () => Result<EditorSnapshot>;
@@ -188,6 +352,14 @@ type ResolvedEditorShellPorts = Readonly<{
       delta: PageDelta;
     }>,
   ) => Result<EditorSnapshot>;
+  beginResizeInteraction: () => Result<ResizeInteractionStart>;
+  proposeResize: (
+    input: Readonly<{
+      start: ResizeInteractionStart;
+      input: Parameters<ResizeProposalProvider['resize']>[1];
+    }>,
+  ) => Result<ResizeInteractionProposal>;
+  commitResize: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   reportInteractionError: (error: BringsError) => void;
   runHistory: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
   deleteSelection: () => Result<EditorSnapshot>;
@@ -222,6 +394,9 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   proposeAreaSelection: () => unavailable('selection.unavailable'),
   commitSelection: () => unavailable('selection.unavailable'),
   commitMove: () => unavailable('transform.unavailable'),
+  beginResizeInteraction: () => unavailable('resize.unavailable'),
+  proposeResize: () => unavailable('resize.unavailable'),
+  commitResize: () => unavailable('resize.unavailable'),
   reportInteractionError: () => undefined,
   runHistory: () => unavailable('history.unavailable'),
   deleteSelection: () => unavailable('selection.delete-unavailable'),
@@ -250,6 +425,10 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
       ports.proposeAreaSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposeAreaSelection,
     commitSelection: ports.commitSelection ?? DEFAULT_EDITOR_SHELL_PORTS.commitSelection,
     commitMove: ports.commitMove ?? DEFAULT_EDITOR_SHELL_PORTS.commitMove,
+    beginResizeInteraction:
+      ports.beginResizeInteraction ?? DEFAULT_EDITOR_SHELL_PORTS.beginResizeInteraction,
+    proposeResize: ports.proposeResize ?? DEFAULT_EDITOR_SHELL_PORTS.proposeResize,
+    commitResize: ports.commitResize ?? DEFAULT_EDITOR_SHELL_PORTS.commitResize,
     reportInteractionError:
       ports.reportInteractionError ?? DEFAULT_EDITOR_SHELL_PORTS.reportInteractionError,
     runHistory: ports.runHistory ?? DEFAULT_EDITOR_SHELL_PORTS.runHistory,
@@ -441,12 +620,18 @@ export class EditorShell extends Entity {
   private activeTool: CanvasTool = 'select';
   private selectionSession: MarqueeSelectionSession | null = null;
   private selectionPointerId: number | null = null;
-  private terminalInteraction: SelectionGestureSessionSnapshot | null = null;
+  private resizeSession: ResizeSelectionSession | null = null;
+  private resizePointerId: number | null = null;
+  private resizeInteraction: CapturedResizeInteraction | null = null;
+  private terminalInteraction:
+    SelectionGestureSessionSnapshot | ResizeSelectionSessionSnapshot | null = null;
   private pointerRouteVersion = 0;
   private readonly quarantinedPointerIds = new Set<number>();
+  private readonly reportedRenderErrors = new Set<string>();
   private layout: EditorLayout;
   private readonly ports: ResolvedEditorShellPorts;
   private readonly selectionProvider: SelectionProposalProvider;
+  private readonly resizeProvider: ResizeProposalProvider;
   private readonly selectionInterpreter: SelectionGestureInterpreter;
 
   public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
@@ -456,9 +641,13 @@ export class EditorShell extends Entity {
       point: (start, point, mode) => this.ports.proposePointSelection(start, point, mode),
       area: (start, rect, mode) => this.ports.proposeAreaSelection(start, rect, mode),
     };
+    this.resizeProvider = {
+      resize: (start, input) => this.ports.proposeResize({ start, input }),
+    };
     this.selectionInterpreter = new SelectionGestureInterpreter({
       commitSelection: (proposal) => this.ports.commitSelection(proposal),
       commitMove: (input) => this.ports.commitMove(input),
+      commitResize: (proposal) => this.ports.commitResize(proposal),
       reportInteractionError: (error) => this.ports.reportInteractionError(error),
       markDirty: () => this.scene?.markDirty(),
     });
@@ -490,6 +679,10 @@ export class EditorShell extends Entity {
 
   /** Read a fresh detached interaction snapshot without exposing mutation controls. */
   public interactionSnapshot(): EditorInteractionSnapshot {
+    const activeResize = this.resizeSession?.snapshot();
+    if (activeResize !== undefined) {
+      return snapshotResizeSession(activeResize, this.selectionInterpreter.visual);
+    }
     const source = this.selectionSession?.snapshot() ?? this.terminalInteraction;
     if (source === null) {
       return Object.freeze({
@@ -501,6 +694,9 @@ export class EditorShell extends Entity {
         current: null,
         visual: null,
       });
+    }
+    if ('handle' in source) {
+      return snapshotResizeSession(source, this.selectionInterpreter.visual);
     }
     const session = snapshotSession(source);
     return Object.freeze({
@@ -533,6 +729,14 @@ export class EditorShell extends Entity {
   }
 
   public resize(width: number, height: number): void {
+    if (this.authoringEnabled && width < 600 && this.resizeSession !== null) {
+      const session = this.resizeSession;
+      const pointerId = this.resizePointerId;
+      const effect = session.cancel({ kind: 'escape' });
+      this.closeResizeSession(session);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+    }
     this.width = width;
     this.height = height;
     this.layout = resolveEditorLayout(width, height);
@@ -627,38 +831,115 @@ export class EditorShell extends Entity {
     const visual = this.selectionInterpreter.visual;
     const selected = new Set((visual?.selection ?? snapshot.selection).nodeIds);
     const movementDelta = visual?.movementDelta;
+    const resizeDelta = visual?.resize?.command.delta;
+    const resizeRoots = new Set(visual?.resize?.command.nodeIds ?? []);
     const nodes = new Map(document.nodes.map((node) => [node.id, node]));
+    const nodeIndexes = new Map(document.nodes.map((node, index) => [node.id, index]));
     const renderNode = (
       node: SceneNode,
-      parentX: number,
-      parentY: number,
+      parentMatrix: Matrix,
+      parentOpacity: number,
       ancestorMoved: boolean,
+      ancestorResized: boolean,
     ): void => {
       if (!node.visible) return;
+      const nodeIndex = nodeIndexes.get(node.id);
+      if (nodeIndex === undefined) return;
+      const transformPath = `/nodes/${nodeIndex}/transform`;
+      if (node.transform[1] !== 0 || node.transform[2] !== 0) {
+        this.reportRenderErrorOnce({
+          code: 'render.transform-unsupported',
+          path: transformPath,
+        });
+        return;
+      }
       const movesBranch = selected.has(node.id) && !ancestorMoved && movementDelta != null;
-      const x = parentX + node.transform[4] + (movesBranch ? (movementDelta?.x ?? 0) : 0);
-      const y = parentY + node.transform[5] + (movesBranch ? (movementDelta?.y ?? 0) : 0);
+      const resizesBranch =
+        resizeRoots.has(node.id) && !ancestorResized && resizeDelta !== undefined;
+      let localMatrix = node.transform;
+      if (resizesBranch) {
+        const resized = resolveResizePreviewLocalMatrix(parentMatrix, localMatrix, resizeDelta);
+        if (!resized.ok) {
+          this.reportRenderErrorOnce({
+            code:
+              resized.reason === 'unsupported'
+                ? 'render.transform-unsupported'
+                : 'render.transform-overflow',
+            path: transformPath,
+          });
+          return;
+        }
+        localMatrix = resized.value;
+      } else if (movesBranch) {
+        const localDelta = moveDeltaInParentSpace(parentMatrix, movementDelta);
+        if (localDelta === null) {
+          this.reportRenderErrorOnce({
+            code: 'render.transform-unsupported',
+            path: transformPath,
+          });
+          return;
+        }
+        localMatrix = Object.freeze([
+          localMatrix[0],
+          localMatrix[1],
+          localMatrix[2],
+          localMatrix[3],
+          localMatrix[4] + localDelta.x,
+          localMatrix[5] + localDelta.y,
+        ]) as Matrix;
+      }
+      const pageMatrix = multiplyMatrices(parentMatrix, localMatrix);
+      if (pageMatrix === null) {
+        this.reportRenderErrorOnce({ code: 'render.transform-overflow', path: transformPath });
+        return;
+      }
+      const opacity = parentOpacity * node.opacity;
+      if (!Number.isFinite(opacity)) {
+        this.reportRenderErrorOnce({
+          code: 'render.opacity-overflow',
+          path: `/nodes/${nodeIndex}/opacity`,
+        });
+        return;
+      }
+      renderer.save();
+      if (!applyAxisAlignedMatrix(renderer, localMatrix)) {
+        renderer.restore();
+        this.reportRenderErrorOnce({
+          code: 'render.transform-unsupported',
+          path: transformPath,
+        });
+        return;
+      }
       if (node.type === 'frame' || node.type === 'rectangle') {
-        renderer.save();
-        renderer.setGlobalAlpha(node.opacity);
+        renderer.setGlobalAlpha(opacity);
         renderer.beginPath();
-        renderer.roundRect(x, y, node.width, node.height, [...node.cornerRadii]);
+        renderer.roundRect(0, 0, node.width, node.height, [...node.cornerRadii]);
         const fill = node.type === 'frame' ? node.background : node.fill;
         if (fill !== null) renderer.fill(this.paint(fill));
         if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
         if (selected.has(node.id)) {
+          renderer.setGlobalAlpha(1);
           renderer.beginPath();
-          renderer.roundRect(x - 2, y - 2, node.width + 4, node.height + 4, [...node.cornerRadii]);
+          renderer.roundRect(-2, -2, node.width + 4, node.height + 4, [...node.cornerRadii]);
           renderer.stroke('#2563eb', 2);
         }
-        renderer.restore();
       }
+      if (node.type === 'frame' && node.clipChildren) renderer.clip(0, 0, node.width, node.height);
       if (node.type === 'frame' || node.type === 'group') {
         for (const childId of node.childIds) {
           const child = nodes.get(childId);
-          if (child !== undefined) renderNode(child, x, y, ancestorMoved || movesBranch);
+          if (child !== undefined) {
+            renderNode(
+              child,
+              pageMatrix,
+              opacity,
+              ancestorMoved || movesBranch,
+              ancestorResized || resizesBranch,
+            );
+          }
         }
       }
+      renderer.restore();
     };
     const activePage = document.pages.find((page) => page.id === document.activePageId);
     if (activePage === undefined) return;
@@ -666,8 +947,9 @@ export class EditorShell extends Entity {
     renderer.translate(originX, originY);
     for (const rootId of activePage.rootNodeIds) {
       const root = nodes.get(rootId);
-      if (root !== undefined) renderNode(root, 0, 0, false);
+      if (root !== undefined) renderNode(root, IDENTITY_MATRIX, 1, false, false);
     }
+    this.renderResizeOverlay(renderer, visual);
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
       const source = visual.marquee;
       const x = Math.min(source.x, source.x + source.width);
@@ -685,16 +967,52 @@ export class EditorShell extends Entity {
     renderer.restore();
   }
 
-  private routeCanvasPointer(event: VectoJSEvent): void {
-    const routeVersion = ++this.pointerRouteVersion;
-    const captured = this.snapshotPointerEvent(event);
-    if (this.pointerRouteVersion !== routeVersion) return;
-    if (!captured.ok) {
-      this.rejectInvalidNativePointer(event, captured);
+  private renderResizeOverlay(renderer: IRenderer, visual: SelectionGestureVisual | null): void {
+    if (!this.authoringEnabled || this.activeTool !== 'select' || this.selectionSession !== null) {
       return;
     }
-    const native = captured.value;
-    const pointerId = native.pointerId;
+    if (visual !== null && visual.resize === undefined) return;
+    let interaction = this.resizeInteraction;
+    if (interaction === null) {
+      try {
+        const result = this.ports.beginResizeInteraction();
+        if (!result.ok) return;
+        const captured = captureResizeInteraction(result.value);
+        if (!captured.ok) return;
+        interaction = captured.value;
+      } catch {
+        return;
+      }
+    }
+    const overlay = interaction.overlay(visual?.resize);
+    if (overlay === null || overlay.handles.length !== 8) return;
+    const bounds = overlay.bounds;
+    const width = bounds.maxX - bounds.minX;
+    const height = bounds.maxY - bounds.minY;
+
+    renderer.save();
+    renderer.setGlobalAlpha(1);
+    renderer.beginPath();
+    renderer.roundRect(bounds.minX, bounds.minY, width, height, 0);
+    renderer.stroke('#2563eb', 1);
+    for (const handle of overlay.handles) {
+      renderer.beginPath();
+      renderer.roundRect(handle.x, handle.y, handle.width, handle.height, 0);
+      renderer.fill('#ffffff');
+      renderer.stroke('#2563eb', 1);
+    }
+    renderer.restore();
+  }
+
+  private routeCanvasPointer(event: VectoJSEvent): void {
+    const routeVersion = ++this.pointerRouteVersion;
+    const head = this.snapshotPointerHead(event);
+    if (this.pointerRouteVersion !== routeVersion) return;
+    if (!head.ok) {
+      this.rejectInvalidNativePointer(event, head);
+      return;
+    }
+    const pointerId = head.value.pointerId;
     if (this.quarantinedPointerIds.has(pointerId)) {
       if (event.type === 'pointerup' || event.type === 'pointercancel') {
         this.quarantinedPointerIds.delete(pointerId);
@@ -702,18 +1020,46 @@ export class EditorShell extends Entity {
       return;
     }
 
-    if (event.type === 'pointercancel') {
-      const session = this.selectionSession;
-      if (session === null || this.selectionPointerId !== pointerId) return;
-      const effect = session.cancel({ kind: 'pointercancel', pointerId });
-      this.closeSelectionSession(session);
-      this.selectionInterpreter.apply(effect);
-      event.preventDefault();
+    const activePointerId = this.resizePointerId ?? this.selectionPointerId;
+    if (activePointerId !== null && activePointerId !== pointerId) {
+      if (event.type === 'pointerdown') this.quarantinedPointerIds.add(pointerId);
       return;
     }
 
+    if (event.type === 'pointercancel') {
+      const resizeSession = this.resizeSession;
+      if (resizeSession !== null && this.resizePointerId === pointerId) {
+        const effect = resizeSession.cancel({ kind: 'pointercancel', pointerId });
+        this.closeResizeSession(resizeSession);
+        this.selectionInterpreter.apply(effect);
+        event.preventDefault();
+        return;
+      }
+      const selectionSession = this.selectionSession;
+      if (selectionSession !== null && this.selectionPointerId === pointerId) {
+        const effect = selectionSession.cancel({ kind: 'pointercancel', pointerId });
+        this.closeSelectionSession(selectionSession);
+        this.selectionInterpreter.apply(effect);
+        event.preventDefault();
+      }
+      return;
+    }
+
+    const captured = this.snapshotPointerEvent(head.value);
+    if (this.pointerRouteVersion !== routeVersion) return;
+    if (!captured.ok) {
+      this.rejectInvalidNativePointer(event, captured);
+      return;
+    }
+    const native = captured.value;
+
     if (event.type === 'pointerdown') {
       this.routeCanvasPointerDown(event, native, routeVersion);
+      return;
+    }
+    const resizeSession = this.resizeSession;
+    if (resizeSession !== null && this.resizePointerId === pointerId) {
+      this.routeResizePointer(event, native, resizeSession);
       return;
     }
     const session = this.selectionSession;
@@ -748,6 +1094,41 @@ export class EditorShell extends Entity {
     }
   }
 
+  private routeResizePointer(
+    event: VectoJSEvent,
+    native: NativePointerSnapshot,
+    session: ResizeSelectionSession,
+  ): void {
+    const pointerId = native.pointerId;
+    const sampled = this.resizeSample(event, native);
+    if (!sampled.ok) {
+      const effect = session.cancel({ kind: 'error', error: sampled.error });
+      this.closeResizeSession(session);
+      if (event.type !== 'pointerup') this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointermove') {
+      const effect = session.update(sampled.value, this.resizeProvider);
+      if (this.resizeSession !== session) return;
+      if (effect.kind === 'discard') {
+        this.closeResizeSession(session);
+        this.quarantinedPointerIds.add(pointerId);
+      }
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointerup') {
+      const effect = session.finish(sampled.value, this.resizeProvider);
+      if (this.resizeSession !== session) return;
+      this.closeResizeSession(session);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+    }
+  }
+
   private routeCanvasPointerDown(
     event: VectoJSEvent,
     native: Readonly<{
@@ -762,11 +1143,12 @@ export class EditorShell extends Entity {
   ): void {
     if (!this.authoringEnabled) return;
     const pointerId = native.pointerId;
-    if (this.selectionSession !== null) {
-      if (this.selectionPointerId !== pointerId) this.quarantinedPointerIds.add(pointerId);
+    const activePointerId = this.resizePointerId ?? this.selectionPointerId;
+    if (activePointerId !== null) {
+      if (activePointerId !== pointerId) this.quarantinedPointerIds.add(pointerId);
       return;
     }
-    const supported = native.button === 0 && !native.altKey && !native.ctrlKey && !native.metaKey;
+    const supported = native.button === 0 && !native.ctrlKey && !native.metaKey;
     if (!supported) {
       this.quarantinedPointerIds.add(pointerId);
       return;
@@ -778,6 +1160,10 @@ export class EditorShell extends Entity {
     }
 
     if (this.activeTool !== 'select') {
+      if (native.altKey) {
+        this.quarantinedPointerIds.add(pointerId);
+        return;
+      }
       const result = this.ports.createAt(
         this.activeTool,
         sampled.value.pagePoint.x,
@@ -787,20 +1173,113 @@ export class EditorShell extends Entity {
       return;
     }
 
+    let resizeStartResult: Result<ResizeInteractionStart>;
+    try {
+      resizeStartResult = this.ports.beginResizeInteraction();
+    } catch {
+      if (
+        this.pointerRouteVersion !== routeVersion ||
+        this.selectionSession !== null ||
+        this.resizeSession !== null
+      ) {
+        return;
+      }
+      this.rejectPointer(pointerId, {
+        code: 'interaction.begin-threw',
+        path: '/beginResizeInteraction',
+      });
+      return;
+    }
+    if (
+      this.pointerRouteVersion !== routeVersion ||
+      this.selectionSession !== null ||
+      this.resizeSession !== null
+    ) {
+      return;
+    }
+    if (resizeStartResult.ok) {
+      const currentRoute = () =>
+        this.pointerRouteVersion === routeVersion &&
+        this.selectionSession === null &&
+        this.resizeSession === null;
+      const captured = captureResizeInteraction(resizeStartResult.value, currentRoute);
+      if (!currentRoute()) return;
+      if (!captured.ok) {
+        this.rejectPointer(pointerId, captured.error);
+        return;
+      }
+      const handle: ResizeHandle | null = captured.value.hit(sampled.value.pagePoint);
+      if (!currentRoute()) return;
+      if (handle !== null) {
+        const resizeSample: ResizePointerSample = Object.freeze({
+          pointerId,
+          pagePoint: sampled.value.pagePoint,
+          shiftKey: native.shiftKey,
+          altKey: native.altKey,
+        });
+        const begun = ResizeSelectionSession.begin(
+          captured.value.start,
+          handle,
+          resizeSample,
+          this.resizeProvider,
+        );
+        if (
+          this.pointerRouteVersion !== routeVersion ||
+          this.selectionSession !== null ||
+          this.resizeSession !== null
+        ) {
+          return;
+        }
+        if (!begun.ok) {
+          this.rejectPointer(pointerId, begun.error);
+          return;
+        }
+        this.resizeSession = begun.value;
+        this.resizePointerId = pointerId;
+        this.resizeInteraction = captured.value;
+        this.terminalInteraction = null;
+        event.preventDefault();
+        return;
+      }
+    }
+
+    if (native.altKey) {
+      this.quarantinedPointerIds.add(pointerId);
+      return;
+    }
+
     let start: SelectionInteractionStart;
     try {
       start = this.ports.beginSelectionInteraction();
     } catch {
-      if (this.pointerRouteVersion !== routeVersion || this.selectionSession !== null) return;
+      if (
+        this.pointerRouteVersion !== routeVersion ||
+        this.selectionSession !== null ||
+        this.resizeSession !== null
+      ) {
+        return;
+      }
       this.rejectPointer(pointerId, {
         code: 'interaction.begin-threw',
         path: '/beginSelectionInteraction',
       });
       return;
     }
-    if (this.pointerRouteVersion !== routeVersion || this.selectionSession !== null) return;
+    if (
+      this.pointerRouteVersion !== routeVersion ||
+      this.selectionSession !== null ||
+      this.resizeSession !== null
+    ) {
+      return;
+    }
     const begun = MarqueeSelectionSession.begin(start, sampled.value, this.selectionProvider);
-    if (this.pointerRouteVersion !== routeVersion || this.selectionSession !== null) return;
+    if (
+      this.pointerRouteVersion !== routeVersion ||
+      this.selectionSession !== null ||
+      this.resizeSession !== null
+    ) {
+      return;
+    }
     if (!begun.ok) {
       this.rejectPointer(pointerId, begun.error);
       return;
@@ -811,17 +1290,8 @@ export class EditorShell extends Entity {
     event.preventDefault();
   }
 
-  private snapshotPointerEvent(event: VectoJSEvent): NativePointerSnapshotResult {
-    let source:
-      | {
-          readonly pointerId?: number;
-          readonly button?: number;
-          readonly shiftKey?: boolean;
-          readonly altKey?: boolean;
-          readonly ctrlKey?: boolean;
-          readonly metaKey?: boolean;
-        }
-      | undefined;
+  private snapshotPointerHead(event: VectoJSEvent): NativePointerHeadResult {
+    let source: NativePointerSource | undefined;
     try {
       source = event.nativeEvent as typeof source;
     } catch {
@@ -837,7 +1307,17 @@ export class EditorShell extends Entity {
     if (pointerId === undefined || !Number.isFinite(pointerId)) {
       return pointerInvalid('/nativeEvent/pointerId', null);
     }
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({ source: source ?? Object.freeze({}), pointerId }),
+    });
+  }
 
+  private snapshotPointerEvent(
+    head: Readonly<{ source: NativePointerSource; pointerId: number }>,
+  ): NativePointerSnapshotResult {
+    const source = head.source;
+    const pointerId = head.pointerId;
     let button: number | undefined;
     let shiftKey: boolean | undefined;
     let altKey: boolean | undefined;
@@ -883,7 +1363,7 @@ export class EditorShell extends Entity {
 
   private rejectInvalidNativePointer(
     event: VectoJSEvent,
-    failure: Extract<NativePointerSnapshotResult, { ok: false }>,
+    failure: Readonly<{ ok: false; error: BringsError; pointerId: number | null }>,
   ): void {
     const pointerId = failure.pointerId;
     if (pointerId === null) {
@@ -893,6 +1373,16 @@ export class EditorShell extends Entity {
     const terminal = event.type === 'pointerup' || event.type === 'pointercancel';
     if (this.quarantinedPointerIds.has(pointerId)) {
       if (terminal) this.quarantinedPointerIds.delete(pointerId);
+      return;
+    }
+
+    const resizeSession = this.resizeSession;
+    if (resizeSession !== null && this.resizePointerId === pointerId) {
+      const effect = resizeSession.cancel({ kind: 'error', error: failure.error });
+      this.closeResizeSession(resizeSession);
+      if (!terminal) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
       return;
     }
 
@@ -931,8 +1421,32 @@ export class EditorShell extends Entity {
     };
   }
 
+  private resizeSample(
+    event: VectoJSEvent,
+    native: Readonly<{ pointerId: number; shiftKey: boolean; altKey: boolean }>,
+  ): Result<ResizePointerSample> {
+    const sampled = this.selectionSample(event, native);
+    if (!sampled.ok) return sampled;
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        pointerId: native.pointerId,
+        pagePoint: sampled.value.pagePoint,
+        shiftKey: native.shiftKey,
+        altKey: native.altKey,
+      }),
+    });
+  }
+
   private rejectPointer(pointerId: number, error: BringsError): void {
     this.quarantinedPointerIds.add(pointerId);
+    this.ports.reportInteractionError(error);
+  }
+
+  private reportRenderErrorOnce(error: BringsError): void {
+    const key = `${error.code}:${error.path}`;
+    if (this.reportedRenderErrors.has(key)) return;
+    this.reportedRenderErrors.add(key);
     this.ports.reportInteractionError(error);
   }
 
@@ -945,7 +1459,28 @@ export class EditorShell extends Entity {
     return true;
   }
 
+  private closeResizeSession(expected: ResizeSelectionSession): boolean {
+    if (this.resizeSession !== expected) return false;
+    const terminal = expected.snapshot();
+    this.resizeSession = null;
+    this.resizePointerId = null;
+    this.resizeInteraction = null;
+    this.terminalInteraction = terminal.phase === 'terminal' ? terminal : null;
+    return true;
+  }
+
   private routeEditorShortcut(event: VectoJSEvent): void {
+    if (event.key === 'Escape' && this.resizeSession !== null) {
+      const session = this.resizeSession;
+      const pointerId = this.resizePointerId;
+      const effect = session.cancel({ kind: 'escape' });
+      this.closeResizeSession(session);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Escape' && this.selectionSession !== null) {
       const session = this.selectionSession;
       const pointerId = this.selectionPointerId;
