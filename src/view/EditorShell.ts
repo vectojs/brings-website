@@ -645,16 +645,13 @@ export class EditorShell extends Entity {
     '#475569',
   );
   private readonly selectTool = new ToolbarButton('brings-select-tool', 'Select', () => {
-    this.activeTool = 'select';
-    this.scene?.markDirty();
+    this.activateTool('select');
   });
   private readonly frameTool = new ToolbarButton('brings-frame-tool', 'Frame', () => {
-    this.activeTool = 'frame';
-    this.scene?.markDirty();
+    this.activateTool('frame');
   });
   private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
-    this.activeTool = 'rectangle';
-    this.scene?.markDirty();
+    this.activateTool('rectangle');
   });
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
@@ -1534,6 +1531,35 @@ export class EditorShell extends Entity {
     this.resizeInteraction = null;
     this.terminalInteraction = terminal.phase === 'terminal' ? terminal : null;
     return true;
+  }
+
+  private activateTool(tool: CanvasTool): void {
+    if (tool === this.activeTool) return;
+
+    // A tool switch is a transactional boundary: no preview owned by the old
+    // tool may remain visible or accept a late terminal pointer event.
+    this.pointerRouteVersion += 1;
+    const resizeSession = this.resizeSession;
+    if (resizeSession !== null) {
+      const pointerId = this.resizePointerId;
+      const effect = resizeSession.cancel({ kind: 'escape' });
+      this.closeResizeSession(resizeSession);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+    } else {
+      const selectionSession = this.selectionSession;
+      if (selectionSession !== null) {
+        const pointerId = this.selectionPointerId;
+        const effect = selectionSession.cancel({ kind: 'escape' });
+        this.closeSelectionSession(selectionSession);
+        if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+        this.selectionInterpreter.apply(effect);
+      }
+    }
+
+    this.activeTool = tool;
+    this.applyLayout();
+    this.scene?.markDirty();
   }
 
   private routeEditorShortcut(event: VectoJSEvent): void {

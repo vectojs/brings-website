@@ -1245,6 +1245,78 @@ test('clears alignment guide painting after an unsnapped preview and cancellatio
   expect(canceled.calls.some((call) => call.method === 'lineTo')).toBe(false);
 });
 
+test('discards snapped move and resize previews before switching tools', () => {
+  const guides = Object.freeze([alignmentGuide('x', 204, 80, 260)]);
+  const moveStart = interactionStart([first]);
+  let moveCommits = 0;
+  const moveShell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot([first]),
+    beginSelectionInteraction: () => moveStart,
+    proposePointSelection: () => ({
+      ok: true,
+      value: { ownerId: first, proposal: proposal(moveStart, [first]) },
+    }),
+    proposeMove: (_captured, selection, delta) => ({
+      ok: true,
+      value: Object.freeze({
+        token: selection.token,
+        selection: selection.selection,
+        rawDelta: Object.freeze({ ...delta }),
+        delta: Object.freeze({ ...delta }),
+        guides,
+      }),
+    }),
+    commitMove: () => {
+      moveCommits += 1;
+      return { ok: true, value: editorSnapshot([first]) };
+    },
+  });
+
+  dispatchPointer(moveShell, 'pointerdown', { pointerId: 73, x: 120, y: 140 });
+  dispatchPointer(moveShell, 'pointermove', { pointerId: 73, x: 130, y: 150 });
+  expect(moveShell.interactionSnapshot().visual?.guides).toEqual(guides);
+  const frameTool = childById(moveShell, 'brings-frame-tool');
+  frameTool.dispatchEvent(new VectoJSEvent('pointerdown', frameTool));
+
+  expect(moveShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+  expect(frameTool.getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Frame tool selected',
+  });
+  const moved = recordingRenderer();
+  moveShell.render(moved.renderer);
+  expect(moved.calls.some((call) => call.method === 'lineTo')).toBe(false);
+  dispatchPointer(moveShell, 'pointerup', { pointerId: 73, x: 130, y: 150 });
+  expect(moveCommits).toBe(0);
+
+  const resizeState = resizePorts({ guides });
+  const resizeShell = new EditorShell(1440, 900, resizeState.ports);
+  dispatchPointer(resizeShell, 'pointerdown', { pointerId: 74, x: 200, y: 200 });
+  dispatchPointer(resizeShell, 'pointermove', { pointerId: 74, x: 220, y: 220 });
+  expect(resizeShell.interactionSnapshot().visual?.guides).toEqual(guides);
+  const rectangleTool = childById(resizeShell, 'brings-rectangle-tool');
+  rectangleTool.dispatchEvent(new VectoJSEvent('pointerdown', rectangleTool));
+
+  expect(resizeShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+  expect(rectangleTool.getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Rectangle tool selected',
+  });
+  const resized = recordingRenderer();
+  resizeShell.render(resized.renderer);
+  expect(resized.calls.some((call) => call.method === 'lineTo')).toBe(false);
+  dispatchPointer(resizeShell, 'pointerup', { pointerId: 74, x: 220, y: 220 });
+  expect(resizeState.commits).toEqual([]);
+});
+
 test('renders axis-aligned node scale instead of dropping durable affine terms', () => {
   const snapshot = editorSnapshot([first]);
   const scaled: EditorSnapshot = {
