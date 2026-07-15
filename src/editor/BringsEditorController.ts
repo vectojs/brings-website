@@ -12,7 +12,9 @@ import {
   type CreateDocumentInput,
   type EditorSnapshot,
   type NodeId,
+  type NodePropertyPatchInput,
   type Result,
+  type SceneNode,
   type ResizeBounds,
   type ResizeHandlePosition,
   type SelectionResizeProposal,
@@ -40,6 +42,19 @@ import type {
 
 /** Caller-owned allocation boundary for document and initial-page identities. */
 export type UuidFactory = () => string;
+
+/** One canvas Layers row derived directly from the active Core document page. */
+export type BringsLayerItem = Readonly<{
+  id: NodeId;
+  parentId: NodeId | null;
+  type: SceneNode['type'];
+  name: string;
+  depth: number;
+  visible: boolean;
+  locked: boolean;
+  selected: boolean;
+  hasChildren: boolean;
+}>;
 
 type ControllerStore = Pick<
   BringsDocumentStore,
@@ -217,6 +232,123 @@ export class BringsEditorController {
   /** Return a Core-owned detached snapshot suitable for rendering or diagnostics. */
   public snapshot(): EditorSnapshot {
     return this.store.snapshot();
+  }
+
+  /** Flatten the active page hierarchy in Core paint order for the Layers panel. */
+  public layers(): readonly BringsLayerItem[] {
+    const snapshot = this.store.snapshot();
+    const page = snapshot.document.pages.find(
+      (candidate) => candidate.id === snapshot.document.activePageId,
+    );
+    if (page === undefined) return [];
+    const nodes = new Map(snapshot.document.nodes.map((node) => [node.id, node]));
+    const selected = new Set(snapshot.selection.nodeIds);
+    const layers: BringsLayerItem[] = [];
+    const visit = (nodeId: NodeId, depth: number): void => {
+      const node = nodes.get(nodeId);
+      if (node === undefined) return;
+      const hasChildren = node.type === 'frame' || node.type === 'group';
+      layers.push(
+        Object.freeze({
+          id: node.id,
+          parentId: node.parentId,
+          type: node.type,
+          name: node.name,
+          depth,
+          visible: node.visible,
+          locked: node.locked,
+          selected: selected.has(node.id),
+          hasChildren,
+        }),
+      );
+      if (!hasChildren) return;
+      for (const childId of node.childIds) visit(childId, depth + 1);
+    };
+    for (const rootId of page.rootNodeIds) visit(rootId, 0);
+    return Object.freeze(layers);
+  }
+
+  /** Set ephemeral selection from a Layers interaction without adding history. */
+  public setLayerSelection(
+    nodeIds: readonly string[],
+    activeNodeId: string | null = nodeIds.at(-1) ?? null,
+  ): Result<EditorSnapshot> {
+    const before = this.store.snapshot().selection;
+    return this.finishOperation(before, this.store.setSelection({ nodeIds, activeNodeId }));
+  }
+
+  /** Apply one Core-compatible patch to the normalized current selection. */
+  public setSelectionProperties(patch: NodePropertyPatchInput): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    if (snapshot.selection.nodeIds.length === 0) return this.failure('selection.empty', '/nodeIds');
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.execute({
+        kind: 'set-node-properties',
+        nodeIds: snapshot.selection.nodeIds,
+        patch,
+      }),
+    );
+  }
+
+  /** Rename exactly one active layer through the Core property command. */
+  public renameSelection(name: string): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    if (snapshot.selection.nodeIds.length !== 1)
+      return this.failure('selection.single-required', '/nodeIds');
+    return this.setSelectionProperties({ name });
+  }
+
+  /** Toggle visibility for every selected compatible Core node. */
+  public setSelectionVisibility(visible: boolean): Result<EditorSnapshot> {
+    return this.setSelectionProperties({ visible });
+  }
+
+  /** Toggle lock state for every selected compatible Core node. */
+  public setSelectionLocked(locked: boolean): Result<EditorSnapshot> {
+    return this.setSelectionProperties({ locked });
+  }
+
+  /** Toggle one Layers-row visibility without changing the active selection first. */
+  public toggleLayerVisibility(nodeId: string): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    const node = snapshot.document.nodes.find((candidate) => candidate.id === nodeId);
+    if (node === undefined) return this.failure('node.not-found', '/nodeIds');
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.execute({
+        kind: 'set-node-properties',
+        nodeIds: [node.id],
+        patch: { visible: !node.visible },
+      }),
+    );
+  }
+
+  /** Wrap selected sibling roots in a named Core Group. */
+  public groupSelection(name = 'Group'): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    if (snapshot.selection.nodeIds.length < 2)
+      return this.failure('selection.group-minimum', '/nodeIds');
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.execute({
+        kind: 'group-nodes',
+        nodeIds: snapshot.selection.nodeIds,
+        group: { id: this.createUuid(), name },
+      }),
+    );
+  }
+
+  /** Dissolve the one selected Core Group while retaining Core history behavior. */
+  public ungroupSelection(): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    if (snapshot.selection.nodeIds.length !== 1 || snapshot.selection.activeNodeId === null) {
+      return this.failure('selection.single-required', '/nodeIds');
+    }
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.execute({ kind: 'ungroup-node', nodeId: snapshot.selection.activeNodeId }),
+    );
   }
 
   /** Return complete detached controller state for deterministic transaction diagnostics. */

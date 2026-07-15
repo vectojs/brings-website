@@ -240,6 +240,7 @@ const interactionIds = {
   page: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
   first: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' as NodeId,
   second: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' as NodeId,
+  group: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' as NodeId,
 } as const;
 
 type ControllerStore = Pick<
@@ -282,7 +283,7 @@ function populatedStore(input: CreateDocumentInput): Result<BringsDocumentStore>
 function populatedController(
   createStore: (input: CreateDocumentInput) => Result<ControllerStore> = populatedStore,
 ): BringsEditorController {
-  const ids = [interactionIds.document, interactionIds.page];
+  const ids = [interactionIds.document, interactionIds.page, interactionIds.group];
   return new BringsEditorController(
     () => {
       const id = ids.shift();
@@ -292,6 +293,83 @@ function populatedController(
     { createStore },
   );
 }
+
+test('derives layers and executes Core-backed property and grouping commands', () => {
+  const controller = populatedController();
+
+  expect(controller.layers()).toEqual([
+    {
+      id: interactionIds.first,
+      parentId: null,
+      type: 'rectangle',
+      name: 'Rectangle 1',
+      depth: 0,
+      visible: true,
+      locked: false,
+      selected: false,
+      hasChildren: false,
+    },
+    {
+      id: interactionIds.second,
+      parentId: null,
+      type: 'rectangle',
+      name: 'Rectangle 2',
+      depth: 0,
+      visible: true,
+      locked: false,
+      selected: false,
+      hasChildren: false,
+    },
+  ]);
+
+  expect(controller.setLayerSelection([interactionIds.first], interactionIds.first).ok).toBe(true);
+  expect(controller.renameSelection('Primary card').ok).toBe(true);
+  expect(controller.snapshot()).toMatchObject({
+    document: { revision: 3 },
+    selection: { nodeIds: [interactionIds.first], activeNodeId: interactionIds.first },
+    undoDepth: 3,
+  });
+  expect(controller.snapshot().document.nodes[0]).toMatchObject({
+    id: interactionIds.first,
+    name: 'Primary card',
+  });
+
+  expect(controller.setSelectionVisibility(false).ok).toBe(true);
+  expect(controller.snapshot().selection).toEqual({ nodeIds: [], activeNodeId: null });
+  expect(controller.undo().ok).toBe(true);
+  expect(controller.snapshot().selection).toEqual({
+    nodeIds: [interactionIds.first],
+    activeNodeId: interactionIds.first,
+  });
+  expect(controller.toggleLayerVisibility(interactionIds.second).ok).toBe(true);
+  expect(controller.snapshot()).toMatchObject({
+    selection: { nodeIds: [interactionIds.first], activeNodeId: interactionIds.first },
+  });
+  expect(controller.snapshot().document.nodes[1]).toMatchObject({
+    id: interactionIds.second,
+    visible: false,
+  });
+  expect(controller.toggleLayerVisibility(interactionIds.second).ok).toBe(true);
+
+  expect(
+    controller.setLayerSelection(
+      [interactionIds.first, interactionIds.second],
+      interactionIds.second,
+    ).ok,
+  ).toBe(true);
+  expect(controller.groupSelection('Cards').ok).toBe(true);
+  expect(controller.layers()).toMatchObject([
+    { id: interactionIds.group, type: 'group', name: 'Cards', depth: 0, hasChildren: true },
+    { id: interactionIds.first, parentId: interactionIds.group, depth: 1 },
+    { id: interactionIds.second, parentId: interactionIds.group, depth: 1 },
+  ]);
+  expect(controller.setLayerSelection([interactionIds.group], interactionIds.group).ok).toBe(true);
+  expect(controller.ungroupSelection().ok).toBe(true);
+  expect(controller.layers().map((layer) => layer.id)).toEqual([
+    interactionIds.first,
+    interactionIds.second,
+  ]);
+});
 
 test('begins with a detached selection and monotonically tracked interaction token', () => {
   const controller = populatedController();
@@ -978,21 +1056,21 @@ test('tracks selection generation only when successful operations change selecti
   unwrap(controller.selectAt(90, 110));
   expect(generation()).toBe(1);
   unwrap(controller.createRectangleAt(140, 160));
+  expect(generation()).toBe(1);
+  unwrap(controller.undo());
+  expect(generation()).toBe(1);
+  unwrap(controller.redo());
+  expect(generation()).toBe(1);
+  unwrap(controller.selectAt(145, 165));
+  expect(generation()).toBe(1);
+  unwrap(controller.moveSelectionBy(5, 5));
+  expect(generation()).toBe(1);
+  unwrap(controller.deleteSelection());
   expect(generation()).toBe(2);
   unwrap(controller.undo());
   expect(generation()).toBe(3);
   unwrap(controller.redo());
   expect(generation()).toBe(4);
-  unwrap(controller.selectAt(145, 165));
-  expect(generation()).toBe(5);
-  unwrap(controller.moveSelectionBy(5, 5));
-  expect(generation()).toBe(5);
-  unwrap(controller.deleteSelection());
-  expect(generation()).toBe(6);
-  unwrap(controller.undo());
-  expect(generation()).toBe(7);
-  unwrap(controller.redo());
-  expect(generation()).toBe(8);
 });
 
 test('prepares detached resize geometry and commits the exact proposal as one history entry', () => {

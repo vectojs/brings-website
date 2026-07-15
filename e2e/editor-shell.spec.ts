@@ -112,7 +112,7 @@ async function createAndSelectFrame(
   position: Readonly<{ x: number; y: number }>,
 ): Promise<Readonly<{ id: string; transform: readonly number[] }>> {
   const canvas = page.getByRole('region', { name: 'Design canvas' });
-  await page.getByRole('button', { name: /Frame/ }).click();
+  await page.getByRole('button', { name: 'Frame', exact: true }).click();
   await canvas.click({ position });
   await page.getByRole('button', { name: /Select/ }).click();
   await canvas.click({ position: { x: position.x + 40, y: position.y + 40 } });
@@ -1049,7 +1049,10 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   await page.mouse.down();
   await page.mouse.move(thresholdStart.x + 4 * pageScale, thresholdStart.y);
   const threshold = await readDebug(page);
-  expect(threshold.interaction.phase).toBe('marquee');
+  expect(
+    threshold.interaction.phase,
+    `threshold interaction: ${JSON.stringify(threshold.interaction)}`,
+  ).toBe('marquee');
   expect(threshold.interaction.start?.viewport.x).toBeCloseTo(200, 3);
   expect(threshold.interaction.start?.viewport.y).toBeCloseTo(100, 3);
   expect(threshold.interaction.start?.page.x).toBeCloseTo(200, 3);
@@ -1101,7 +1104,7 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   expect((await readDebug(page)).interaction.phase).toBe('pending');
   await page.mouse.up();
 
-  await page.getByRole('button', { name: /Frame/ }).click();
+  await page.getByRole('button', { name: 'Frame', exact: true }).click();
   await page.mouse.click((bounds.x + 600) * pageScale, (bounds.y + 120) * pageScale);
   await page.getByRole('button', { name: /Select/ }).click();
   await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);

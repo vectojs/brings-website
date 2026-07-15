@@ -41,6 +41,9 @@ scene.renderMode = 'onDemand';
 const editor = new BringsEditorController(() => crypto.randomUUID());
 const shell = new EditorShell(1, 1, {
   documentSnapshot: () => editor.snapshot(),
+  selectLayer: (nodeIds, activeNodeId) => editor.setLayerSelection(nodeIds, activeNodeId),
+  setLayerVisibility: (nodeId) => editor.toggleLayerVisibility(nodeId),
+  setSelectionProperties: (patch) => editor.setSelectionProperties(patch),
   createAt: (tool, x, y) =>
     tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y),
   beginSelectionInteraction: () => editor.beginSelectionInteraction(),
@@ -56,6 +59,8 @@ const shell = new EditorShell(1, 1, {
   reportInteractionError: (error) => interactionErrors.report(error),
   runHistory: (action) => (action === 'undo' ? editor.undo() : editor.redo()),
   deleteSelection: () => editor.deleteSelection(),
+  groupSelection: () => editor.groupSelection(),
+  ungroupSelection: () => editor.ungroupSelection(),
 });
 scene.add(shell);
 

@@ -5,11 +5,14 @@ import {
   type IRenderer,
   type VectoJSEvent,
 } from '@vectojs/core';
+import { Input } from '@vectojs/ui/input';
 import type {
   AlignmentGuide,
   BringsError,
   EditorSnapshot,
   Matrix,
+  NodeId,
+  NodePropertyPatchInput,
   ResizeBounds,
   ResizeHandle,
   ResizePoint,
@@ -17,6 +20,7 @@ import type {
   SceneNode,
   SelectionResizeProposal,
 } from '@vectojs/brings-core';
+import type { BringsLayerItem } from '../editor/BringsEditorController';
 import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
 import type {
   ResizeInteractionProposal,
@@ -28,11 +32,7 @@ import type {
   SelectionProposalProvider,
 } from '../editor/selectionInteraction';
 import { type EditorLayout, resolveEditorLayout } from './layout';
-import {
-  type EditorShortcutAction,
-  isNativeEditorTarget,
-  resolveEditorShortcut,
-} from './editorShortcuts';
+import { isNativeEditorTarget, resolveEditorShortcut } from './editorShortcuts';
 import {
   MarqueeSelectionSession,
   type SelectionGestureSessionSnapshot,
@@ -337,6 +337,14 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
 
 export interface EditorShellPorts {
   readonly documentSnapshot?: () => EditorSnapshot;
+  /** Select a layer without introducing an undoable document change. */
+  readonly selectLayer?: (
+    nodeIds: readonly string[],
+    activeNodeId: string | null,
+  ) => Result<EditorSnapshot>;
+  /** Toggle visibility for one row without selecting it first. */
+  readonly setLayerVisibility?: (nodeId: string) => Result<EditorSnapshot>;
+  readonly setSelectionProperties?: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
@@ -359,12 +367,17 @@ export interface EditorShellPorts {
   ) => Result<ResizeInteractionProposal>;
   readonly commitResize?: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   readonly reportInteractionError?: (error: BringsError) => void;
-  readonly runHistory?: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
+  readonly runHistory?: (action: 'undo' | 'redo') => Result<EditorSnapshot>;
   readonly deleteSelection?: () => Result<EditorSnapshot>;
+  readonly groupSelection?: () => Result<EditorSnapshot>;
+  readonly ungroupSelection?: () => Result<EditorSnapshot>;
 }
 
 type ResolvedEditorShellPorts = Readonly<{
   documentSnapshot: () => EditorSnapshot;
+  selectLayer: (nodeIds: readonly string[], activeNodeId: string | null) => Result<EditorSnapshot>;
+  setLayerVisibility: (nodeId: string) => Result<EditorSnapshot>;
+  setSelectionProperties: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   createAt: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
@@ -387,8 +400,10 @@ type ResolvedEditorShellPorts = Readonly<{
   ) => Result<ResizeInteractionProposal>;
   commitResize: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   reportInteractionError: (error: BringsError) => void;
-  runHistory: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
+  runHistory: (action: 'undo' | 'redo') => Result<EditorSnapshot>;
   deleteSelection: () => Result<EditorSnapshot>;
+  groupSelection: () => Result<EditorSnapshot>;
+  ungroupSelection: () => Result<EditorSnapshot>;
 }>;
 
 const DEFAULT_DOCUMENT_SNAPSHOT = (): EditorSnapshot => ({
@@ -415,6 +430,9 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   ResolvedEditorShellPorts,
   'documentSnapshot' | 'beginSelectionInteraction'
 > = {
+  selectLayer: () => unavailable('layer.selection-unavailable'),
+  setLayerVisibility: () => unavailable('layer.visibility-unavailable'),
+  setSelectionProperties: () => unavailable('properties.unavailable'),
   createAt: () => unavailable('shape.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
@@ -439,12 +457,18 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   reportInteractionError: () => undefined,
   runHistory: () => unavailable('history.unavailable'),
   deleteSelection: () => unavailable('selection.delete-unavailable'),
+  groupSelection: () => unavailable('selection.group-unavailable'),
+  ungroupSelection: () => unavailable('selection.ungroup-unavailable'),
 };
 
 function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPorts {
   const documentSnapshot = ports.documentSnapshot ?? DEFAULT_DOCUMENT_SNAPSHOT;
   return {
     documentSnapshot,
+    selectLayer: ports.selectLayer ?? DEFAULT_EDITOR_SHELL_PORTS.selectLayer,
+    setLayerVisibility: ports.setLayerVisibility ?? DEFAULT_EDITOR_SHELL_PORTS.setLayerVisibility,
+    setSelectionProperties:
+      ports.setSelectionProperties ?? DEFAULT_EDITOR_SHELL_PORTS.setSelectionProperties,
     createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
     beginSelectionInteraction:
       ports.beginSelectionInteraction ??
@@ -473,6 +497,8 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
       ports.reportInteractionError ?? DEFAULT_EDITOR_SHELL_PORTS.reportInteractionError,
     runHistory: ports.runHistory ?? DEFAULT_EDITOR_SHELL_PORTS.runHistory,
     deleteSelection: ports.deleteSelection ?? DEFAULT_EDITOR_SHELL_PORTS.deleteSelection,
+    groupSelection: ports.groupSelection ?? DEFAULT_EDITOR_SHELL_PORTS.groupSelection,
+    ungroupSelection: ports.ungroupSelection ?? DEFAULT_EDITOR_SHELL_PORTS.ungroupSelection,
   };
 }
 
@@ -585,6 +611,133 @@ class CanvasLabel extends Entity {
   }
 }
 
+/** A compact Figma-style row; all changes remain routed through the controller ports. */
+class LayerRow extends Entity {
+  private item: BringsLayerItem | null = null;
+
+  public constructor(
+    id: string,
+    private readonly onSelect: (nodeId: NodeId) => Result<EditorSnapshot>,
+    private readonly onToggleVisibility: (nodeId: NodeId) => Result<EditorSnapshot>,
+    private readonly markDirty: () => void,
+  ) {
+    super(id);
+    this.interactive = true;
+    this.on('pointerdown', (event) => this.routePointerDown(event));
+  }
+
+  public setLayer(item: BringsLayerItem, x: number, y: number, width: number): void {
+    this.item = item;
+    this.x = x;
+    this.y = y;
+    this.width = Math.max(0, width);
+    this.height = 26;
+  }
+
+  public override getA11yAttributes(): A11yAttributes {
+    const item = this.item;
+    if (item === null) return { role: 'button', label: 'Layer' };
+    return {
+      role: 'button',
+      label: `${item.name} layer${item.selected ? ' selected' : ''}`,
+    };
+  }
+
+  public override getContentProjection(): ContentProjection | null {
+    const item = this.item;
+    return item === null ? null : { text: item.name, font: '500 12px system-ui, sans-serif' };
+  }
+
+  public override isPointInside(globalX: number, globalY: number): boolean {
+    const local = this.worldToLocal(globalX, globalY);
+    return (
+      local !== null &&
+      local.x >= 0 &&
+      local.x <= this.width &&
+      local.y >= 0 &&
+      local.y <= this.height
+    );
+  }
+
+  public override render(renderer: IRenderer): void {
+    const item = this.item;
+    if (item === null) return;
+    if (item.selected) {
+      renderer.beginPath();
+      renderer.roundRect(0, 1, this.width, this.height - 2, 4);
+      renderer.fill('#385a98');
+    }
+    const glyph = item.type === 'frame' ? '□' : item.type === 'group' ? '◇' : '◆';
+    renderer.fillText(glyph, 6, 17, '600 11px system-ui, sans-serif', '#aebed6');
+    renderer.fillText(item.name, 24, 17, '500 12px system-ui, sans-serif', '#f3f6fb');
+    if (item.locked)
+      renderer.fillText('▣', this.width - 38, 17, '500 11px system-ui, sans-serif', '#cbd5e1');
+    renderer.fillText(
+      item.visible ? '◉' : '○',
+      this.width - 18,
+      17,
+      '500 11px system-ui, sans-serif',
+      '#cbd5e1',
+    );
+  }
+
+  private routePointerDown(event: VectoJSEvent): void {
+    const item = this.item;
+    if (item === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const result =
+      (event.localX ?? 0) >= this.width - 26
+        ? this.onToggleVisibility(item.id)
+        : this.onSelect(item.id);
+    if (result.ok) this.markDirty();
+  }
+}
+
+class PropertyToggle extends Entity {
+  public checked = false;
+
+  public constructor(
+    id: string,
+    private readonly label: string,
+    private readonly onChange: (checked: boolean) => void,
+  ) {
+    super(id);
+    this.width = 90;
+    this.height = 18;
+    this.interactive = true;
+    this.on('pointerdown', (event) => {
+      event.preventDefault();
+      this.onChange(!this.checked);
+    });
+  }
+
+  public override getA11yAttributes(): A11yAttributes {
+    return { role: 'switch', label: this.label, checked: this.checked };
+  }
+
+  public override isPointInside(globalX: number, globalY: number): boolean {
+    const local = this.worldToLocal(globalX, globalY);
+    return (
+      local !== null &&
+      local.x >= 0 &&
+      local.x <= this.width &&
+      local.y >= 0 &&
+      local.y <= this.height
+    );
+  }
+
+  public override render(renderer: IRenderer): void {
+    renderer.fillText(this.label, 0, 14, '500 12px system-ui, sans-serif', '#dbe5f3');
+    renderer.beginPath();
+    renderer.roundRect(56, 0, 34, 18, 9);
+    renderer.fill(this.checked ? '#4f7dd4' : '#465268');
+    renderer.beginPath();
+    renderer.roundRect(this.checked ? 74 : 58, 2, 14, 14, 7);
+    renderer.fill('#f8fafc');
+  }
+}
+
 /**
  * The first canvas-native Brings surface. It owns explicit numeric panel bounds;
  * later tools reconcile document entities below the `canvasRegion` seam.
@@ -653,6 +806,15 @@ export class EditorShell extends Entity {
   private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
     this.activateTool('rectangle');
   });
+  private readonly layerRows = new Map<NodeId, LayerRow>();
+  private layerSignature = '';
+  private readonly nameInput: Input;
+  private readonly opacityInput: Input;
+  private readonly widthInput: Input;
+  private readonly heightInput: Input;
+  private readonly visibleToggle: PropertyToggle;
+  private readonly lockedToggle: PropertyToggle;
+  private propertySignature = '';
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
   private selectionSession: MarqueeSelectionSession | null = null;
@@ -674,6 +836,12 @@ export class EditorShell extends Entity {
   public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
     super('brings-editor-shell');
     this.ports = resolveEditorShellPorts(ports);
+    this.nameInput = this.createPropertyInput('brings-property-name', 'Name');
+    this.opacityInput = this.createPropertyInput('brings-property-opacity', 'Opacity');
+    this.widthInput = this.createPropertyInput('brings-property-width', 'Width');
+    this.heightInput = this.createPropertyInput('brings-property-height', 'Height');
+    this.visibleToggle = this.createPropertyToggle('brings-property-visible', 'Visible', 'visible');
+    this.lockedToggle = this.createPropertyToggle('brings-property-locked', 'Locked', 'locked');
     this.selectionProvider = {
       point: (start, point, mode) => this.ports.proposePointSelection(start, point, mode),
       area: (start, rect, mode) => this.ports.proposeAreaSelection(start, rect, mode),
@@ -704,10 +872,20 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeLabel);
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
+    this.properties.add(this.nameInput);
+    this.properties.add(this.opacityInput);
+    this.properties.add(this.widthInput);
+    this.properties.add(this.heightInput);
+    this.properties.add(this.visibleToggle);
+    this.properties.add(this.lockedToggle);
     this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
+    // A panel must participate in hit testing so its interactive row descendants can own events.
+    this.layers.setPointerHandler(() => undefined);
     this.layout = resolveEditorLayout(width, height);
     this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
     this.resize(width, height);
+    this.syncLayerRows();
+    this.syncProperties();
   }
 
   /** True while the narrow-screen shell supports editing tools. */
@@ -797,6 +975,8 @@ export class EditorShell extends Entity {
   }
 
   public override render(renderer: IRenderer): void {
+    this.syncLayerRows();
+    this.syncProperties();
     const { toolbarHeight, viewport } = this.layout;
     const toolbarHeightInScene = Math.min(toolbarHeight, this.height);
 
@@ -842,7 +1022,7 @@ export class EditorShell extends Entity {
       20,
       !this.authoringEnabled,
     );
-    this.title.setFrame(20, 35, true);
+    this.title.setFrame(20, 28, true);
     this.selectTool.setFrame(120, 12, this.activeTool === 'select');
     this.frameTool.setFrame(216, 12, this.activeTool === 'frame');
     this.rectangleTool.setFrame(312, 12, this.activeTool === 'rectangle');
@@ -854,6 +1034,190 @@ export class EditorShell extends Entity {
 
     if (!leftOpen) this.layers.setFrame(0, 0, 0, 0, false);
     if (!rightOpen) this.properties.setFrame(0, 0, 0, 0, false);
+    this.layoutLayerRows();
+    this.layoutProperties();
+  }
+
+  private syncLayerRows(): void {
+    const items = this.deriveLayerItems(this.ports.documentSnapshot());
+    const signature = items
+      .map(
+        (item) =>
+          `${item.id}:${item.name}:${item.visible}:${item.locked}:${item.selected}:${item.depth}`,
+      )
+      .join('|');
+    if (signature === this.layerSignature) return;
+    this.layerSignature = signature;
+    const wanted = new Set(items.map((item) => item.id));
+    for (const [id, row] of this.layerRows) {
+      if (wanted.has(id)) continue;
+      this.layers.remove(row);
+      this.layerRows.delete(id);
+    }
+    for (const item of items) {
+      let row = this.layerRows.get(item.id);
+      if (row === undefined) {
+        row = new LayerRow(
+          `brings-layer-${item.id}`,
+          (nodeId) => this.ports.selectLayer([nodeId], nodeId),
+          (nodeId) => this.ports.setLayerVisibility(nodeId),
+          () => this.scene?.markDirty(),
+        );
+        this.layerRows.set(item.id, row);
+        this.layers.add(row);
+      }
+    }
+    this.layoutLayerRows(items);
+  }
+
+  private layoutLayerRows(items = this.deriveLayerItems(this.ports.documentSnapshot())): void {
+    for (const [index, item] of items.entries()) {
+      const row = this.layerRows.get(item.id);
+      if (row === undefined) continue;
+      row.setLayer(
+        item,
+        12 + item.depth * 16,
+        88 + index * 28,
+        this.layers.width - 24 - item.depth * 16,
+      );
+    }
+  }
+
+  private deriveLayerItems(snapshot: EditorSnapshot): readonly BringsLayerItem[] {
+    const page = snapshot.document.pages.find(
+      (candidate) => candidate.id === snapshot.document.activePageId,
+    );
+    if (page === undefined) return [];
+    const nodes = new Map(snapshot.document.nodes.map((node) => [node.id, node]));
+    const selected = new Set(snapshot.selection.nodeIds);
+    const layers: BringsLayerItem[] = [];
+    const visit = (nodeId: NodeId, depth: number): void => {
+      const node = nodes.get(nodeId);
+      if (node === undefined) return;
+      const hasChildren = node.type === 'frame' || node.type === 'group';
+      layers.push({
+        id: node.id,
+        parentId: node.parentId,
+        type: node.type,
+        name: node.name,
+        depth,
+        visible: node.visible,
+        locked: node.locked,
+        selected: selected.has(node.id),
+        hasChildren,
+      });
+      if (!hasChildren) return;
+      for (const childId of node.childIds) visit(childId, depth + 1);
+    };
+    for (const rootId of page.rootNodeIds) visit(rootId, 0);
+    return layers;
+  }
+
+  private createPropertyInput(id: string, placeholder: string): Input {
+    const input = new Input({
+      width: 200,
+      height: 28,
+      placeholder,
+      font: '500 12px system-ui, sans-serif',
+      bg: '#222936',
+      border: '#3c4759',
+      color: '#f8fafc',
+      onChange: () => this.scene?.markDirty(),
+    });
+    input.id = id;
+    input.on('keydown', (event: VectoJSEvent) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      this.commitPropertyInput(input);
+    });
+    input.on('blur', () => this.commitPropertyInput(input));
+    return input;
+  }
+
+  private createPropertyToggle(
+    id: string,
+    label: string,
+    property: 'visible' | 'locked',
+  ): PropertyToggle {
+    return new PropertyToggle(id, label, (checked) =>
+      this.commitProperties({ [property]: checked }),
+    );
+  }
+
+  private layoutProperties(): void {
+    const visible = this.properties.interactive && this.propertySignature !== '';
+    const width = Math.max(0, this.properties.width - 40);
+    const setInput = (input: Input, y: number, show = visible): void => {
+      input.x = 20;
+      input.y = y;
+      input.width = width;
+      input.height = show ? 28 : 0;
+      input.interactive = show;
+      input.opacity = show ? 1 : 0;
+    };
+    setInput(this.nameInput, 58);
+    setInput(this.opacityInput, 94);
+    setInput(this.widthInput, 130, visible && this.widthInput.value !== '');
+    setInput(this.heightInput, 166, visible && this.heightInput.value !== '');
+    this.visibleToggle.x = 20;
+    this.visibleToggle.y = 208;
+    this.visibleToggle.interactive = visible;
+    this.visibleToggle.opacity = visible ? 1 : 0;
+    this.lockedToggle.x = 120;
+    this.lockedToggle.y = 208;
+    this.lockedToggle.interactive = visible;
+    this.lockedToggle.opacity = visible ? 1 : 0;
+  }
+
+  private syncProperties(): void {
+    const snapshot = this.ports.documentSnapshot();
+    const activeId = snapshot.selection.activeNodeId;
+    const node =
+      activeId === null ? undefined : snapshot.document.nodes.find((item) => item.id === activeId);
+    const signature =
+      node === undefined
+        ? ''
+        : `${node.id}:${node.name}:${node.visible}:${node.locked}:${node.opacity}:${'width' in node ? node.width : ''}:${'height' in node ? node.height : ''}`;
+    if (signature === this.propertySignature) return;
+    this.propertySignature = signature;
+    this.nameInput.value = node?.name ?? '';
+    this.opacityInput.value = node === undefined ? '' : String(Math.round(node.opacity * 100));
+    this.widthInput.value = node !== undefined && 'width' in node ? String(node.width) : '';
+    this.heightInput.value = node !== undefined && 'height' in node ? String(node.height) : '';
+    this.visibleToggle.checked = node?.visible ?? false;
+    this.lockedToggle.checked = node?.locked ?? false;
+    this.layoutProperties();
+  }
+
+  private commitPropertyInput(input: Input): void {
+    if (input === this.nameInput) this.commitProperties({ name: input.value.trim() });
+    else if (input === this.opacityInput)
+      this.commitNumberProperty('opacity', input.value, 0, 100, 0.01);
+    else if (input === this.widthInput)
+      this.commitNumberProperty('width', input.value, 0, Number.MAX_SAFE_INTEGER, 1);
+    else this.commitNumberProperty('height', input.value, 0, Number.MAX_SAFE_INTEGER, 1);
+  }
+
+  private commitNumberProperty(
+    property: 'opacity' | 'width' | 'height',
+    value: string,
+    minimum: number,
+    maximum: number,
+    scale: number,
+  ): void {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) return;
+    this.commitProperties({ [property]: parsed * scale });
+  }
+
+  private commitProperties(patch: NodePropertyPatchInput): void {
+    const snapshot = this.ports.documentSnapshot();
+    if (snapshot.selection.nodeIds.length === 0) return;
+    const result = this.ports.setSelectionProperties(patch);
+    if (result.ok) {
+      this.propertySignature = '';
+      this.scene?.markDirty();
+    }
   }
 
   private renderPanel(renderer: IRenderer, panel: EditorRegion): void {
@@ -1591,7 +1955,13 @@ export class EditorShell extends Entity {
     event.preventDefault();
     event.stopPropagation();
     const result =
-      action === 'delete' ? this.ports.deleteSelection() : this.ports.runHistory(action);
+      action === 'delete'
+        ? this.ports.deleteSelection()
+        : action === 'group'
+          ? this.ports.groupSelection()
+          : action === 'ungroup'
+            ? this.ports.ungroupSelection()
+            : this.ports.runHistory(action);
     if (result.ok) this.scene?.markDirty();
   }
 

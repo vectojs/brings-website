@@ -320,6 +320,18 @@ test('stays pending below and enters marquee at the four logical-pixel squared t
   expect(log.area).toHaveLength(1);
 });
 
+test('treats a sub-millipixel scale-rounding loss at the threshold as a marquee', () => {
+  const start = interactionStart();
+  const { provider, log } = providerFixture({ ownerId: null });
+  const session = beginSession(start, pointerSample(8, 10, 10), provider);
+
+  expect(session.update(pointerSample(8, 13.99997, 10), provider)).toMatchObject({
+    kind: 'preview',
+    visual: { marquee: { x: 10, y: 10 } },
+  });
+  expect(log.area).toHaveLength(1);
+});
+
 test('exposes fresh frozen JSON-safe diagnostics and retains accepted pending samples', () => {
   const start = interactionStart();
   const { provider } = providerFixture({ ownerId: null });

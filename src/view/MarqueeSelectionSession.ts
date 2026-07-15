@@ -25,6 +25,9 @@ import type {
 } from '../editor/selectionInteraction';
 
 const GESTURE_THRESHOLD_SQUARED = 4 * 4;
+// CDP/browser scaling can turn an exact logical 4px delta into 3.99997px.
+// Keep the interaction threshold logical without making that raster rounding a click.
+const GESTURE_THRESHOLD_EPSILON = 1e-3;
 const INTERRUPTED = Symbol('marquee-session-interrupted');
 const IGNORE_EFFECT = Object.freeze({ kind: 'ignore' } as const);
 
@@ -556,7 +559,10 @@ export class MarqueeSelectionSession {
   ): AdvanceOutcome {
     const distanceSquared = this.distanceSquared(sample.viewportPoint);
     if (!distanceSquared.ok) return { kind: 'effect', effect: this.discard(distanceSquared.error) };
-    if (this.phase === 'pending' && distanceSquared.value < GESTURE_THRESHOLD_SQUARED) {
+    if (
+      this.phase === 'pending' &&
+      distanceSquared.value < GESTURE_THRESHOLD_SQUARED - GESTURE_THRESHOLD_EPSILON
+    ) {
       return { kind: 'below-threshold' };
     }
     return this.ownerId === null

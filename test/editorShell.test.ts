@@ -361,6 +361,94 @@ test('projects the named Brings application and primary editor regions', () => {
   ]);
 });
 
+test('renders ordered interactive layer rows from the Core snapshot', () => {
+  const selected = editorSnapshot([second]);
+  const selections: Array<readonly string[]> = [];
+  const visibility: string[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => selected,
+    selectLayer: (nodeIds, activeNodeId) => {
+      selections.push([...nodeIds, activeNodeId ?? '']);
+      return { ok: true, value: selected };
+    },
+    setLayerVisibility: (nodeId) => {
+      visibility.push(nodeId);
+      return { ok: true, value: selected };
+    },
+  });
+  shell.render(recordingRenderer().renderer);
+
+  const frame = childById(shell, `brings-layer-${first}`);
+  const rectangle = childById(shell, `brings-layer-${second}`);
+  expect(frame.getA11yAttributes()).toEqual({ role: 'button', label: 'Frame layer' });
+  expect(rectangle.getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Rectangle layer selected',
+  });
+  expect(rectangle.x).toBeGreaterThan(frame.x);
+  expect(rectangle.y).toBeGreaterThan(frame.y);
+
+  rectangle.dispatchEvent(
+    new VectoJSEvent('pointerdown', rectangle, { button: 0 }, true, {
+      x: rectangle.x + 20,
+      y: rectangle.y + 12,
+    }),
+  );
+  expect(selections).toEqual([[second, second]]);
+
+  rectangle.dispatchEvent(
+    new VectoJSEvent('pointerdown', rectangle, { button: 0 }, true, {
+      x: rectangle.x + rectangle.width - 12,
+      y: rectangle.y + 12,
+    }),
+  );
+  expect(visibility).toEqual([second]);
+});
+
+test('projects selected-node properties and commits only through the Core port', () => {
+  const selected = editorSnapshot([second]);
+  const patches: unknown[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => selected,
+    setSelectionProperties: (patch) => {
+      patches.push(patch);
+      return { ok: true, value: selected };
+    },
+  });
+  shell.render(recordingRenderer().renderer);
+
+  const name = childById(shell, 'brings-property-name');
+  const opacity = childById(shell, 'brings-property-opacity');
+  const visible = childById(shell, 'brings-property-visible');
+  expect(name.getA11yAttributes()).toMatchObject({ label: 'Name', value: 'Rectangle' });
+  expect(opacity.getA11yAttributes()).toMatchObject({ label: 'Opacity', value: '100' });
+  expect(visible.getA11yAttributes()).toEqual({ role: 'switch', label: 'Visible', checked: true });
+
+  visible.dispatchEvent(new VectoJSEvent('pointerdown', visible, { button: 0 }));
+  expect(patches).toEqual([{ visible: false }]);
+});
+
+test('hides inactive property controls instead of painting empty editor chrome', () => {
+  const empty = new EditorShell(1440, 900);
+  empty.render(recordingRenderer().renderer);
+
+  for (const id of [
+    'brings-property-name',
+    'brings-property-opacity',
+    'brings-property-width',
+    'brings-property-height',
+    'brings-property-visible',
+    'brings-property-locked',
+  ]) {
+    expect(childById(empty, id).opacity).toBe(0);
+  }
+
+  const selected = new EditorShell(1440, 900, { documentSnapshot: () => editorSnapshot([second]) });
+  selected.render(recordingRenderer().renderer);
+  expect(childById(selected, 'brings-property-name').opacity).toBe(1);
+  expect(childById(selected, 'brings-property-visible').opacity).toBe(1);
+});
+
 test('keeps closed drawers out of hit testing and accessibility projection', () => {
   const shell = new EditorShell(1024, 768);
   const properties = childById(shell, 'brings-properties');
@@ -386,10 +474,10 @@ test('keeps closed drawers out of hit testing and accessibility projection', () 
     width: properties.width,
     height: properties.height,
   }).toEqual({
-    x: 728,
-    y: 56,
-    width: 296,
-    height: 712,
+    x: 744,
+    y: 48,
+    width: 280,
+    height: 720,
   });
 });
 
@@ -1116,11 +1204,11 @@ test('renders preview movement once per selected branch and paints marquee after
   const movementRecording = recordingRenderer();
   shell.render(movementRecording.renderer);
   expect(movementRecording.paintedRects).toContainEqual({
-    matrix: [1, 0, 0, 1, 360, 206],
+    matrix: [1, 0, 0, 1, 368, 198],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
   expect(movementRecording.paintedRects).toContainEqual({
-    matrix: [1, 0, 0, 1, 370, 218],
+    matrix: [1, 0, 0, 1, 378, 210],
     args: [0, 0, 20, 16, [0, 0, 0, 0]],
   });
   expect(movementRecording.calls.filter((call) => call.method === 'save')).toHaveLength(
@@ -1144,7 +1232,7 @@ test('renders preview movement once per selected branch and paints marquee after
       JSON.stringify(call.args.slice(0, 4)) === JSON.stringify([-2, -2, 104, 84]),
   );
   const panelIndex = marqueeRecording.calls.findLastIndex(
-    (call) => call.method === 'roundRect' && call.args[1] === 56,
+    (call) => call.method === 'roundRect' && call.args[1] === 48,
   );
   expect(outlineIndex).toBeGreaterThan(-1);
   expect(marqueeIndex).toBeGreaterThan(outlineIndex);
@@ -1336,7 +1424,7 @@ test('renders axis-aligned node scale instead of dropping durable affine terms',
   expect(recording.calls).toContainEqual({ method: 'translate', args: [100, 120] });
   expect(recording.calls).toContainEqual({ method: 'scale', args: [2, 1.5] });
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 1.5, 340, 176],
+    matrix: [2, 0, 0, 1.5, 348, 168],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
 });
@@ -1370,11 +1458,11 @@ test('composes scaled descendants and keeps selected movement in page space', ()
   shell.render(recording.renderer);
 
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 1.5, 360, 206],
+    matrix: [2, 0, 0, 1.5, 368, 198],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
   expect(recording.paintedRects).toContainEqual({
-    matrix: [6, 0, 0, 6, 380, 224],
+    matrix: [6, 0, 0, 6, 388, 216],
     args: [0, 0, 20, 16, [0, 0, 0, 0]],
   });
 });
@@ -1396,7 +1484,7 @@ test('preserves signed axis scale for anchor-crossing previews', () => {
   shell.render(recording.renderer);
 
   expect(recording.paintedRects).toContainEqual({
-    matrix: [-2, 0, 0, -1.5, 340, 176],
+    matrix: [-2, 0, 0, -1.5, 348, 168],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
 });
@@ -1490,7 +1578,7 @@ test('draws Core aggregate bounds and eight 8px handles in frozen Core order', (
   expect(handleRects.map(({ args }) => [Number(args[0]) + 4, Number(args[1]) + 4])).toEqual(
     resizeHandles.map(({ point }) => [point.x, point.y]),
   );
-  expect(handleRects.every(({ matrix }) => JSON.stringify(matrix) === '[1,0,0,1,240,56]')).toBe(
+  expect(handleRects.every(({ matrix }) => JSON.stringify(matrix) === '[1,0,0,1,248,48]')).toBe(
     true,
   );
 
@@ -1796,11 +1884,11 @@ test('renders a page-space resize delta once at the normalized selected root and
   shell.render(recording.renderer);
 
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 3, 340, 176],
+    matrix: [2, 0, 0, 3, 348, 168],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 3, 360, 212],
+    matrix: [2, 0, 0, 3, 368, 204],
     args: [0, 0, 20, 16, [0, 0, 0, 0]],
   });
   expect(recording.calls.filter(({ method }) => method === 'save')).toHaveLength(
@@ -1836,7 +1924,7 @@ test('preserves negative resize scales and matches the exact post-commit visual 
   const preview = recordingRenderer();
   shell.render(preview.renderer);
   const previewRoot = preview.paintedRects.find(({ args }) => args[2] === 100 && args[3] === 80);
-  expect(previewRoot?.matrix).toEqual([-1, 0, 0, -1, 440, 256]);
+  expect(previewRoot?.matrix).toEqual([-1, 0, 0, -1, 448, 248]);
 
   dispatchPointer(shell, 'pointerup', { pointerId: 94, x: 80, y: 80 });
   const durable = recordingRenderer();
@@ -2086,19 +2174,19 @@ test('applies resize preview only to authoritative command roots and their desce
   shell.render(recording.renderer);
 
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 2, 340, 176],
+    matrix: [2, 0, 0, 2, 348, 168],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 2, 360, 200],
+    matrix: [2, 0, 0, 2, 368, 192],
     args: [0, 0, 20, 16, [0, 0, 0, 0]],
   });
   expect(recording.paintedRects).toContainEqual({
-    matrix: [2, 0, 0, 2, 740, 136],
+    matrix: [2, 0, 0, 2, 748, 128],
     args: [0, 0, 30, 20, [0, 0, 0, 0]],
   });
   expect(recording.paintedRects).toContainEqual({
-    matrix: [1, 0, 0, 1, 640, 156],
+    matrix: [1, 0, 0, 1, 648, 148],
     args: [0, 0, 40, 20, [0, 0, 0, 0]],
   });
 });
