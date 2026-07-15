@@ -6,6 +6,7 @@ import {
   type VectoJSEvent,
 } from '@vectojs/core';
 import type {
+  AlignmentGuide,
   BringsError,
   EditorSnapshot,
   Matrix,
@@ -268,6 +269,23 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
   const marquee = visual.marquee;
   const movementDelta = visual.movementDelta;
   const resize = visual.resize;
+  const guides = visual.guides;
+  const detachedGuides =
+    guides === undefined
+      ? undefined
+      : Object.freeze(
+          guides.map((guide) =>
+            Object.freeze({
+              axis: guide.axis,
+              sourceAnchor: guide.sourceAnchor,
+              targetAnchor: guide.targetAnchor,
+              targetNodeId: guide.targetNodeId,
+              coordinate: guide.coordinate,
+              minExtent: guide.minExtent,
+              maxExtent: guide.maxExtent,
+            }),
+          ),
+        );
   const selection = Object.freeze({
     nodeIds: Object.freeze([...visual.selection.nodeIds]),
     activeNodeId: visual.selection.activeNodeId,
@@ -290,6 +308,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
       marquee: null,
       movementDelta: null,
       resize: detachedResize,
+      ...(detachedGuides === undefined ? {} : { guides: detachedGuides }),
     });
   }
   if (movementDelta !== null) {
@@ -297,6 +316,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
       selection,
       marquee: null,
       movementDelta: Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta,
+      ...(detachedGuides === undefined ? {} : { guides: detachedGuides }),
     });
   }
   return Object.freeze({
@@ -311,6 +331,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
             height: marquee.height,
           }),
     movementDelta: null,
+    ...(detachedGuides === undefined ? {} : { guides: detachedGuides }),
   });
 }
 
@@ -969,6 +990,7 @@ export class EditorShell extends Entity {
       const root = nodes.get(rootId);
       if (root !== undefined) renderNode(root, IDENTITY_MATRIX, 1, false, false);
     }
+    this.renderAlignmentGuides(renderer, visual?.guides ?? []);
     this.renderResizeOverlay(renderer, visual);
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
       const source = visual.marquee;
@@ -983,6 +1005,31 @@ export class EditorShell extends Entity {
       renderer.fill('rgba(37, 99, 235, 0.12)');
       renderer.stroke('#2563eb', 1);
       renderer.restore();
+    }
+    renderer.restore();
+  }
+
+  private renderAlignmentGuides(renderer: IRenderer, guides: readonly AlignmentGuide[]): void {
+    renderer.save();
+    renderer.setGlobalAlpha(1);
+    for (const guide of guides) {
+      if (
+        (guide.axis !== 'x' && guide.axis !== 'y') ||
+        !Number.isFinite(guide.coordinate) ||
+        !Number.isFinite(guide.minExtent) ||
+        !Number.isFinite(guide.maxExtent)
+      ) {
+        continue;
+      }
+      renderer.beginPath();
+      if (guide.axis === 'x') {
+        renderer.moveTo(guide.coordinate, guide.minExtent);
+        renderer.lineTo(guide.coordinate, guide.maxExtent);
+      } else {
+        renderer.moveTo(guide.minExtent, guide.coordinate);
+        renderer.lineTo(guide.maxExtent, guide.coordinate);
+      }
+      renderer.stroke('#2563eb', 1);
     }
     renderer.restore();
   }

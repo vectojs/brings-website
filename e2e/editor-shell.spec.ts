@@ -41,6 +41,15 @@ type BrowserInteraction = Readonly<{
     selection: Readonly<{ nodeIds: readonly string[]; activeNodeId: string | null }>;
     marquee: Readonly<{ x: number; y: number; width: number; height: number }> | null;
     movementDelta: Readonly<{ x: number; y: number }> | null;
+    guides?: readonly Readonly<{
+      axis: 'x' | 'y';
+      sourceAnchor: 'min' | 'center' | 'max';
+      targetAnchor: 'min' | 'center' | 'max';
+      targetNodeId: string;
+      coordinate: number;
+      minExtent: number;
+      maxExtent: number;
+    }>[];
     resize?: Readonly<{
       handle: NonNullable<BrowserInteraction['handle']>;
       anchor: Readonly<{ x: number; y: number }>;
@@ -113,6 +122,33 @@ async function createAndSelectFrame(
   );
   if (selected === undefined) throw new Error('The created Frame was not selected.');
   return selected;
+}
+
+async function createTwoFramesAndSelectFirst(
+  page: Page,
+  firstPosition: Readonly<{ x: number; y: number }>,
+  secondPosition: Readonly<{ x: number; y: number }>,
+): Promise<
+  readonly [
+    Readonly<{ id: string; transform: readonly number[] }>,
+    Readonly<{ id: string; transform: readonly number[] }>,
+  ]
+> {
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await canvas.click({ position: firstPosition });
+  await canvas.click({ position: secondPosition });
+  await page.getByRole('button', { name: /Select/ }).click();
+  await canvas.click({ position: { x: firstPosition.x + 40, y: firstPosition.y + 40 } });
+  const snapshot = await readDebug(page);
+  const frames = snapshot.snapshot.document.nodes.filter((node) => node.type === 'frame');
+  if (frames.length !== 2 || frames[0] === undefined || frames[1] === undefined) {
+    throw new Error('Two Frames were not created in canonical page order.');
+  }
+  if (snapshot.snapshot.selection.activeNodeId !== frames[0].id) {
+    throw new Error('The first Frame was not selected.');
+  }
+  return [frames[0], frames[1]];
 }
 
 function expectNumbersClose(
@@ -1064,7 +1100,321 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   await resizeAt(10.1);
   expect((await readDebug(page)).interaction.phase).toBe('pending');
   await page.mouse.up();
+
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await page.mouse.click((bounds.x + 600) * pageScale, (bounds.y + 120) * pageScale);
+  await page.getByRole('button', { name: /Select/ }).click();
+  await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
+  await page.mouse.move((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
+  await page.mouse.down();
+  await page.mouse.move((bounds.x + 236) * pageScale, (bounds.y + 160) * pageScale, {
+    steps: 4,
+  });
+  const snapped = await readDebug(page);
+  expect(snapped.interaction.phase).toBe('moving');
+  expect(snapped.interaction.visual?.movementDelta?.x).toBeCloseTo(100, 3);
+  expect(snapped.interaction.visual?.movementDelta?.y).toBeCloseTo(0, 3);
+  const xGuide = snapped.interaction.visual?.guides?.find((guide) => guide.axis === 'x');
+  expect(xGuide?.coordinate).toBeCloseTo(600, 3);
+  expect(await page.evaluate(() => window.devicePixelRatio)).toBe(2);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect((await readDebug(page)).interaction.visual).toBeNull();
   await cdp.detach();
+});
+
+test('snaps a move with page-space guides, one history entry, and reversible cleanup', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const [firstFrame, secondFrame] = await createTwoFramesAndSelectFirst(
+    page,
+    { x: 100, y: 120 },
+    { x: 600, y: 120 },
+  );
+  const before = (await readDebug(page)).snapshot;
+  const start = await projectedPoint(page, { x: 140, y: 160 });
+  const near = await projectedPoint(page, { x: 236, y: 160 });
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(near.x, near.y, { steps: 4 });
+
+  const preview = await readDebug(page);
+  expect(preview.interaction).toMatchObject({
+    phase: 'moving',
+    visual: {
+      selection: { nodeIds: [firstFrame.id], activeNodeId: firstFrame.id },
+      movementDelta: { x: 100, y: 0 },
+      guides: expect.arrayContaining([
+        expect.objectContaining({
+          axis: 'x',
+          sourceAnchor: 'max',
+          targetAnchor: 'min',
+          targetNodeId: secondFrame.id,
+          coordinate: secondFrame.transform[4],
+          minExtent: Math.min(firstFrame.transform[5] ?? 0, secondFrame.transform[5] ?? 0),
+          maxExtent: Math.max(firstFrame.transform[5] ?? 0, secondFrame.transform[5] ?? 0) + 300,
+        }),
+        expect.objectContaining({
+          axis: 'y',
+          targetNodeId: secondFrame.id,
+          coordinate: secondFrame.transform[5],
+          maxExtent: (secondFrame.transform[4] ?? 0) + 400,
+        }),
+      ]),
+    },
+  });
+  // The displayed source starts at its durable x plus the snapped movement delta.
+  // Core 0.10.0 still reports this y-guide extent from the raw candidate; the
+  // separately tracked Core patch must make minExtent equal this value.
+  const displayedSourceMinX =
+    (firstFrame.transform[4] ?? 0) + (preview.interaction.visual?.movementDelta?.x ?? 0);
+  expect(displayedSourceMinX).toBeCloseTo((firstFrame.transform[4] ?? 0) + 100, 10);
+  expect(preview.snapshot).toEqual(before);
+  expect(
+    await page.evaluate(() => {
+      const visual = Reflect.get(window, '__brings').interaction().visual;
+      return {
+        guides: Object.isFrozen(visual.guides),
+        firstGuide: Object.isFrozen(visual.guides[0]),
+      };
+    }),
+  ).toEqual({ guides: true, firstGuide: true });
+
+  await page.mouse.up();
+  const committed = await readDebug(page);
+  expect(
+    committed.snapshot.document.nodes.find((node) => node.id === firstFrame.id)?.transform,
+  ).toEqual([1, 0, 0, 1, (firstFrame.transform[4] ?? 0) + 100, firstFrame.transform[5]]);
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    undoDepth: before.undoDepth + 1,
+    redoDepth: 0,
+  });
+
+  await page.keyboard.press('Control+z');
+  const undone = await readDebug(page);
+  expect(
+    undone.snapshot.document.nodes.find((node) => node.id === firstFrame.id)?.transform,
+  ).toEqual(firstFrame.transform);
+  await page.keyboard.press('Control+Shift+z');
+  const redone = await readDebug(page);
+  expect(
+    redone.snapshot.document.nodes.find((node) => node.id === firstFrame.id)?.transform,
+  ).toEqual([1, 0, 0, 1, (firstFrame.transform[4] ?? 0) + 100, firstFrame.transform[5]]);
+
+  const movedStart = await projectedPoint(page, { x: 240, y: 160 });
+  await page.mouse.move(movedStart.x, movedStart.y);
+  await page.mouse.down();
+  await page.mouse.move(movedStart.x + 5, movedStart.y);
+  expect((await readDebug(page)).interaction.visual?.guides?.length).toBeGreaterThan(0);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect((await readDebug(page)).interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+
+  await page.mouse.move(movedStart.x, movedStart.y);
+  await page.mouse.down();
+  await page.mouse.move(movedStart.x + 5, movedStart.y);
+  const active = await readDebug(page);
+  expect(active.interaction.visual?.guides?.length).toBeGreaterThan(0);
+  const pointerId = active.interaction.pointerId;
+  if (pointerId === null) throw new Error('The snapped move has no pointer owner.');
+  await page.getByRole('region', { name: 'Design canvas' }).evaluate(
+    (element, input) => {
+      element.dispatchEvent(
+        new PointerEvent('pointercancel', {
+          bubbles: true,
+          cancelable: true,
+          clientX: input.x,
+          clientY: input.y,
+          pointerId: input.pointerId,
+        }),
+      );
+    },
+    { x: movedStart.x + 5, y: movedStart.y, pointerId },
+  );
+  await page.mouse.up();
+  expect((await readDebug(page)).interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+  expect((await readDebug(page)).snapshot).toEqual(redone.snapshot);
+});
+
+test('snaps east resize with dynamic Shift and Alt samples and clears on pointer cancellation', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const [firstFrame, secondFrame] = await createTwoFramesAndSelectFirst(
+    page,
+    { x: 100, y: 120 },
+    { x: 600, y: 120 },
+  );
+  const before = (await readDebug(page)).snapshot;
+  const east = await projectedPoint(page, { x: 500, y: 270 });
+  await page.mouse.move(east.x, east.y);
+  await page.mouse.down();
+  await page.mouse.move(east.x + 96, east.y);
+
+  const plain = await readDebug(page);
+  expect(plain.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'east',
+    shiftKey: false,
+    altKey: false,
+    visual: {
+      guides: [
+        expect.objectContaining({
+          axis: 'x',
+          targetNodeId: secondFrame.id,
+          coordinate: 600,
+        }),
+      ],
+      resize: { bounds: { minX: 100, maxX: 600 } },
+    },
+  });
+
+  await page.keyboard.down('Shift');
+  await page.mouse.move(east.x + 95, east.y);
+  const shifted = await readDebug(page);
+  expect(shifted.interaction).toMatchObject({
+    shiftKey: true,
+    altKey: false,
+    visual: { guides: [expect.objectContaining({ axis: 'x', coordinate: 600 })] },
+  });
+  expect(shifted.interaction.visual?.resize?.scaleX).toBeCloseTo(
+    shifted.interaction.visual?.resize?.scaleY ?? Number.NaN,
+    10,
+  );
+
+  await page.keyboard.down('Alt');
+  await page.keyboard.up('Shift');
+  await page.mouse.move(east.x + 94, east.y);
+  const centered = await readDebug(page);
+  expect(centered.interaction).toMatchObject({
+    shiftKey: false,
+    altKey: true,
+    visual: { guides: [expect.objectContaining({ axis: 'x', coordinate: 600 })] },
+  });
+  await page.keyboard.up('Alt');
+  await page.mouse.move(east.x + 96, east.y);
+  const finalPreview = await readDebug(page);
+  const finalDelta = finalPreview.interaction.visual?.resize?.command.delta;
+  if (finalDelta === undefined) throw new Error('The snapped east resize has no proposal.');
+  await page.mouse.up();
+
+  const committed = await readDebug(page);
+  expectNumbersClose(
+    committed.snapshot.document.nodes.find((node) => node.id === firstFrame.id)?.transform,
+    multiplyAffine(finalDelta, firstFrame.transform),
+  );
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    undoDepth: before.undoDepth + 1,
+  });
+  await page.keyboard.press('Control+z');
+  expect(
+    (await readDebug(page)).snapshot.document.nodes.find((node) => node.id === firstFrame.id)
+      ?.transform,
+  ).toEqual(firstFrame.transform);
+
+  await page.mouse.move(east.x, east.y);
+  await page.mouse.down();
+  await page.mouse.move(east.x + 96, east.y);
+  const active = await readDebug(page);
+  expect(active.interaction.visual?.guides?.length).toBeGreaterThan(0);
+  const pointerId = active.interaction.pointerId;
+  if (pointerId === null) throw new Error('The snapped resize has no pointer owner.');
+  await page.getByRole('region', { name: 'Design canvas' }).evaluate(
+    (element, input) => {
+      element.dispatchEvent(
+        new PointerEvent('pointercancel', {
+          bubbles: true,
+          cancelable: true,
+          clientX: input.x,
+          clientY: input.y,
+          pointerId: input.pointerId,
+        }),
+      );
+    },
+    { x: east.x + 96, y: east.y, pointerId },
+  );
+  await page.mouse.up();
+  expect((await readDebug(page)).interaction.visual).toBeNull();
+});
+
+test('snaps a south-east resize on both axes and replays the exact proposal', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const [firstFrame, secondFrame] = await createTwoFramesAndSelectFirst(
+    page,
+    { x: 100, y: 120 },
+    { x: 600, y: 500 },
+  );
+  const before = (await readDebug(page)).snapshot;
+  const corner = await projectedPoint(page, { x: 500, y: 420 });
+  await page.mouse.move(corner.x, corner.y);
+  await page.mouse.down();
+  await page.mouse.move(corner.x + 96, corner.y + 76, { steps: 4 });
+
+  const preview = await readDebug(page);
+  expect(preview.interaction).toMatchObject({
+    phase: 'resizing',
+    handle: 'south-east',
+    visual: {
+      resize: { bounds: { minX: 100, minY: 120, maxX: 600, maxY: 500 } },
+      guides: expect.arrayContaining([
+        expect.objectContaining({
+          axis: 'x',
+          targetNodeId: secondFrame.id,
+          coordinate: 600,
+        }),
+        expect.objectContaining({
+          axis: 'y',
+          targetNodeId: secondFrame.id,
+          coordinate: 500,
+        }),
+      ]),
+    },
+  });
+  const delta = preview.interaction.visual?.resize?.command.delta;
+  if (delta === undefined) throw new Error('The snapped corner resize has no proposal.');
+  await page.mouse.up();
+
+  const committed = await readDebug(page);
+  const committedTransform = committed.snapshot.document.nodes.find(
+    (node) => node.id === firstFrame.id,
+  )?.transform;
+  expectNumbersClose(committedTransform, multiplyAffine(delta, firstFrame.transform));
+  expect(committed.snapshot).toMatchObject({
+    document: { revision: before.document.revision + 1 },
+    undoDepth: before.undoDepth + 1,
+    redoDepth: 0,
+  });
+  await page.keyboard.press('Control+z');
+  expect(
+    (await readDebug(page)).snapshot.document.nodes.find((node) => node.id === firstFrame.id)
+      ?.transform,
+  ).toEqual(firstFrame.transform);
+  await page.keyboard.press('Control+Shift+z');
+  expectNumbersClose(
+    (await readDebug(page)).snapshot.document.nodes.find((node) => node.id === firstFrame.id)
+      ?.transform,
+    committedTransform ?? [],
+  );
 });
 
 test('previews and commits one Core-backed corner resize through the projected canvas', async ({
