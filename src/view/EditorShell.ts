@@ -128,7 +128,7 @@ class EditorRegion extends Entity {
   public override render(_renderer: IRenderer): void {}
 }
 
-export type CreationTool = 'frame' | 'rectangle';
+export type CreationTool = 'frame' | 'rectangle' | 'text';
 type CanvasTool = 'select' | CreationTool;
 
 type NativePointerSnapshot = Readonly<{
@@ -667,7 +667,8 @@ class LayerRow extends Entity {
       renderer.roundRect(0, 1, this.width, this.height - 2, 4);
       renderer.fill('#385a98');
     }
-    const glyph = item.type === 'frame' ? '□' : item.type === 'group' ? '◇' : '◆';
+    const glyph =
+      item.type === 'frame' ? '□' : item.type === 'group' ? '◇' : item.type === 'text' ? 'T' : '◆';
     renderer.fillText(glyph, 6, 17, '600 11px system-ui, sans-serif', '#aebed6');
     renderer.fillText(item.name, 24, 17, '500 12px system-ui, sans-serif', '#f3f6fb');
     if (item.locked)
@@ -806,12 +807,16 @@ export class EditorShell extends Entity {
   private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
     this.activateTool('rectangle');
   });
+  private readonly textTool = new ToolbarButton('brings-text-tool', 'Text', () => {
+    this.activateTool('text');
+  });
   private readonly layerRows = new Map<NodeId, LayerRow>();
   private layerSignature = '';
   private readonly nameInput: Input;
   private readonly opacityInput: Input;
   private readonly widthInput: Input;
   private readonly heightInput: Input;
+  private readonly contentInput: Input;
   private readonly visibleToggle: PropertyToggle;
   private readonly lockedToggle: PropertyToggle;
   private propertySignature = '';
@@ -840,6 +845,7 @@ export class EditorShell extends Entity {
     this.opacityInput = this.createPropertyInput('brings-property-opacity', 'Opacity');
     this.widthInput = this.createPropertyInput('brings-property-width', 'Width');
     this.heightInput = this.createPropertyInput('brings-property-height', 'Height');
+    this.contentInput = this.createPropertyInput('brings-property-content', 'Text content');
     this.visibleToggle = this.createPropertyToggle('brings-property-visible', 'Visible', 'visible');
     this.lockedToggle = this.createPropertyToggle('brings-property-locked', 'Locked', 'locked');
     this.selectionProvider = {
@@ -866,6 +872,7 @@ export class EditorShell extends Entity {
     this.toolbar.add(this.selectTool);
     this.toolbar.add(this.frameTool);
     this.toolbar.add(this.rectangleTool);
+    this.toolbar.add(this.textTool);
     this.layers.add(this.pagesLabel);
     this.layers.add(this.layersLabel);
     this.canvasRegion.add(this.workspaceLabel);
@@ -876,6 +883,7 @@ export class EditorShell extends Entity {
     this.properties.add(this.opacityInput);
     this.properties.add(this.widthInput);
     this.properties.add(this.heightInput);
+    this.properties.add(this.contentInput);
     this.properties.add(this.visibleToggle);
     this.properties.add(this.lockedToggle);
     this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
@@ -1026,6 +1034,7 @@ export class EditorShell extends Entity {
     this.selectTool.setFrame(120, 12, this.activeTool === 'select');
     this.frameTool.setFrame(216, 12, this.activeTool === 'frame');
     this.rectangleTool.setFrame(312, 12, this.activeTool === 'rectangle');
+    this.textTool.setFrame(408, 12, this.activeTool === 'text');
     this.pagesLabel.setFrame(20, 30, this.layers.interactive);
     this.layersLabel.setFrame(20, 72, this.layers.interactive);
     this.propertiesLabel.setFrame(20, 30, this.properties.interactive);
@@ -1159,12 +1168,13 @@ export class EditorShell extends Entity {
     setInput(this.opacityInput, 94);
     setInput(this.widthInput, 130, visible && this.widthInput.value !== '');
     setInput(this.heightInput, 166, visible && this.heightInput.value !== '');
+    setInput(this.contentInput, 202, visible && this.contentInput.value !== '');
     this.visibleToggle.x = 20;
-    this.visibleToggle.y = 208;
+    this.visibleToggle.y = 244;
     this.visibleToggle.interactive = visible;
     this.visibleToggle.opacity = visible ? 1 : 0;
     this.lockedToggle.x = 120;
-    this.lockedToggle.y = 208;
+    this.lockedToggle.y = 244;
     this.lockedToggle.interactive = visible;
     this.lockedToggle.opacity = visible ? 1 : 0;
   }
@@ -1177,13 +1187,14 @@ export class EditorShell extends Entity {
     const signature =
       node === undefined
         ? ''
-        : `${node.id}:${node.name}:${node.visible}:${node.locked}:${node.opacity}:${'width' in node ? node.width : ''}:${'height' in node ? node.height : ''}`;
+        : `${node.id}:${node.name}:${node.visible}:${node.locked}:${node.opacity}:${'width' in node ? node.width : ''}:${'height' in node ? node.height : ''}:${node.type === 'text' ? node.content : ''}`;
     if (signature === this.propertySignature) return;
     this.propertySignature = signature;
     this.nameInput.value = node?.name ?? '';
     this.opacityInput.value = node === undefined ? '' : String(Math.round(node.opacity * 100));
     this.widthInput.value = node !== undefined && 'width' in node ? String(node.width) : '';
     this.heightInput.value = node !== undefined && 'height' in node ? String(node.height) : '';
+    this.contentInput.value = node?.type === 'text' ? node.content : '';
     this.visibleToggle.checked = node?.visible ?? false;
     this.lockedToggle.checked = node?.locked ?? false;
     this.layoutProperties();
@@ -1195,6 +1206,7 @@ export class EditorShell extends Entity {
       this.commitNumberProperty('opacity', input.value, 0, 100, 0.01);
     else if (input === this.widthInput)
       this.commitNumberProperty('width', input.value, 0, Number.MAX_SAFE_INTEGER, 1);
+    else if (input === this.contentInput) this.commitProperties({ content: input.value });
     else this.commitNumberProperty('height', input.value, 0, Number.MAX_SAFE_INTEGER, 1);
   }
 
@@ -1323,6 +1335,25 @@ export class EditorShell extends Entity {
           renderer.setGlobalAlpha(1);
           renderer.beginPath();
           renderer.roundRect(-2, -2, node.width + 4, node.height + 4, [...node.cornerRadii]);
+          renderer.stroke('#2563eb', 2);
+        }
+      } else if (node.type === 'text') {
+        renderer.setGlobalAlpha(opacity);
+        const font = `${node.fontWeight} ${node.fontSize}px ${node.fontFamilies.join(', ')}`;
+        const lines = node.content.split('\n');
+        for (const [lineIndex, line] of lines.entries()) {
+          renderer.fillText(
+            line,
+            0,
+            node.fontSize + lineIndex * node.lineHeight,
+            font,
+            this.paint(node.fill),
+          );
+        }
+        if (selected.has(node.id)) {
+          renderer.setGlobalAlpha(1);
+          renderer.beginPath();
+          renderer.roundRect(-2, -2, node.width + 4, node.height + 4, 2);
           renderer.stroke('#2563eb', 2);
         }
       }
