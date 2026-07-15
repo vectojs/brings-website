@@ -1162,14 +1162,13 @@ test('snaps a move with page-space guides, one history entry, and reversible cle
           axis: 'y',
           targetNodeId: secondFrame.id,
           coordinate: secondFrame.transform[5],
+          minExtent: (firstFrame.transform[4] ?? 0) + 100,
           maxExtent: (secondFrame.transform[4] ?? 0) + 400,
         }),
       ]),
     },
   });
   // The displayed source starts at its durable x plus the snapped movement delta.
-  // Core 0.10.0 still reports this y-guide extent from the raw candidate; the
-  // separately tracked Core patch must make minExtent equal this value.
   const displayedSourceMinX =
     (firstFrame.transform[4] ?? 0) + (preview.interaction.visual?.movementDelta?.x ?? 0);
   expect(displayedSourceMinX).toBeCloseTo((firstFrame.transform[4] ?? 0) + 100, 10);
