@@ -1,4 +1,4 @@
-export type EditorShortcutAction = 'undo' | 'redo' | 'delete';
+export type EditorShortcutAction = 'undo' | 'redo' | 'delete' | 'group' | 'ungroup';
 
 export interface EditorShortcutEvent {
   readonly key?: string;
@@ -14,6 +14,7 @@ export function resolveEditorShortcut(event: EditorShortcutEvent): EditorShortcu
   const primaryModifier = event.ctrlKey || event.metaKey;
   if (primaryModifier && key === 'z') return event.shiftKey ? 'redo' : 'undo';
   if (event.ctrlKey && key === 'y') return 'redo';
+  if (primaryModifier && key === 'g') return event.shiftKey ? 'ungroup' : 'group';
   const deletionModifier = primaryModifier || event.altKey === true || event.shiftKey;
   if (!deletionModifier && (key === 'delete' || key === 'backspace')) return 'delete';
   return null;

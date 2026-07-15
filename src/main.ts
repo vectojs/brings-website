@@ -59,6 +59,8 @@ const shell = new EditorShell(1, 1, {
   reportInteractionError: (error) => interactionErrors.report(error),
   runHistory: (action) => (action === 'undo' ? editor.undo() : editor.redo()),
   deleteSelection: () => editor.deleteSelection(),
+  groupSelection: () => editor.groupSelection(),
+  ungroupSelection: () => editor.ungroupSelection(),
 });
 scene.add(shell);
 

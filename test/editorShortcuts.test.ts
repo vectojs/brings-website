@@ -8,6 +8,8 @@ describe('editor shortcuts', () => {
     [{ key: 'z', ctrlKey: true, metaKey: false, shiftKey: true }, 'redo'],
     [{ key: 'y', ctrlKey: true, metaKey: false, shiftKey: false }, 'redo'],
     [{ key: 'y', ctrlKey: false, metaKey: true, shiftKey: false }, null],
+    [{ key: 'g', ctrlKey: true, metaKey: false, shiftKey: false }, 'group'],
+    [{ key: 'G', ctrlKey: false, metaKey: true, shiftKey: true }, 'ungroup'],
   ] as const)('resolves history event %o to %s', (event, expected) => {
     expect(resolveEditorShortcut(event)).toBe(expected);
   });

@@ -32,11 +32,7 @@ import type {
   SelectionProposalProvider,
 } from '../editor/selectionInteraction';
 import { type EditorLayout, resolveEditorLayout } from './layout';
-import {
-  type EditorShortcutAction,
-  isNativeEditorTarget,
-  resolveEditorShortcut,
-} from './editorShortcuts';
+import { isNativeEditorTarget, resolveEditorShortcut } from './editorShortcuts';
 import {
   MarqueeSelectionSession,
   type SelectionGestureSessionSnapshot,
@@ -371,8 +367,10 @@ export interface EditorShellPorts {
   ) => Result<ResizeInteractionProposal>;
   readonly commitResize?: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   readonly reportInteractionError?: (error: BringsError) => void;
-  readonly runHistory?: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
+  readonly runHistory?: (action: 'undo' | 'redo') => Result<EditorSnapshot>;
   readonly deleteSelection?: () => Result<EditorSnapshot>;
+  readonly groupSelection?: () => Result<EditorSnapshot>;
+  readonly ungroupSelection?: () => Result<EditorSnapshot>;
 }
 
 type ResolvedEditorShellPorts = Readonly<{
@@ -402,8 +400,10 @@ type ResolvedEditorShellPorts = Readonly<{
   ) => Result<ResizeInteractionProposal>;
   commitResize: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   reportInteractionError: (error: BringsError) => void;
-  runHistory: (action: Exclude<EditorShortcutAction, 'delete'>) => Result<EditorSnapshot>;
+  runHistory: (action: 'undo' | 'redo') => Result<EditorSnapshot>;
   deleteSelection: () => Result<EditorSnapshot>;
+  groupSelection: () => Result<EditorSnapshot>;
+  ungroupSelection: () => Result<EditorSnapshot>;
 }>;
 
 const DEFAULT_DOCUMENT_SNAPSHOT = (): EditorSnapshot => ({
@@ -457,6 +457,8 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   reportInteractionError: () => undefined,
   runHistory: () => unavailable('history.unavailable'),
   deleteSelection: () => unavailable('selection.delete-unavailable'),
+  groupSelection: () => unavailable('selection.group-unavailable'),
+  ungroupSelection: () => unavailable('selection.ungroup-unavailable'),
 };
 
 function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPorts {
@@ -495,6 +497,8 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
       ports.reportInteractionError ?? DEFAULT_EDITOR_SHELL_PORTS.reportInteractionError,
     runHistory: ports.runHistory ?? DEFAULT_EDITOR_SHELL_PORTS.runHistory,
     deleteSelection: ports.deleteSelection ?? DEFAULT_EDITOR_SHELL_PORTS.deleteSelection,
+    groupSelection: ports.groupSelection ?? DEFAULT_EDITOR_SHELL_PORTS.groupSelection,
+    ungroupSelection: ports.ungroupSelection ?? DEFAULT_EDITOR_SHELL_PORTS.ungroupSelection,
   };
 }
 
@@ -1948,7 +1952,13 @@ export class EditorShell extends Entity {
     event.preventDefault();
     event.stopPropagation();
     const result =
-      action === 'delete' ? this.ports.deleteSelection() : this.ports.runHistory(action);
+      action === 'delete'
+        ? this.ports.deleteSelection()
+        : action === 'group'
+          ? this.ports.groupSelection()
+          : action === 'ungroup'
+            ? this.ports.ungroupSelection()
+            : this.ports.runHistory(action);
     if (result.ok) this.scene?.markDirty();
   }
 
