@@ -1,4 +1,5 @@
 import type {
+  AlignmentGuide,
   NodeId,
   ResizeBounds,
   ResizeHandlePosition,
@@ -7,7 +8,7 @@ import type {
   SelectionResizeProposalInput,
   StructuralSelection,
 } from '@vectojs/brings-core';
-import type { EditorPagePoint, EditorPageRect } from './selectionCoordinates';
+import type { EditorPagePoint, EditorPageRect, PageDelta } from './selectionCoordinates';
 
 /** Durable and ephemeral versions captured when one selection gesture begins. */
 export type SelectionInteractionToken = Readonly<{
@@ -42,6 +43,16 @@ export type ResizeInteractionProposal = Readonly<{
   selection: StructuralSelection;
   input: SelectionResizeProposalInput;
   resize: SelectionResizeProposal;
+  guides: readonly AlignmentGuide[];
+}>;
+
+/** One token-bound Core move alignment result safe to preview and commit exactly once. */
+export type MoveInteractionProposal = Readonly<{
+  token: SelectionInteractionToken;
+  selection: StructuralSelection;
+  rawDelta: PageDelta;
+  delta: PageDelta;
+  guides: readonly AlignmentGuide[];
 }>;
 
 export type PointSelectionMode = 'replace' | 'toggle' | 'add-for-drag';
@@ -59,6 +70,11 @@ export type SelectionProposalProvider = Readonly<{
     rect: EditorPageRect,
     mode: AreaSelectionMode,
   ) => Result<SelectionProposal>;
+  move?: (
+    start: SelectionInteractionStart,
+    proposal: SelectionProposal,
+    delta: PageDelta,
+  ) => Result<MoveInteractionProposal>;
 }>;
 
 /** Synchronous Core proposal boundary consumed by the pure resize session. */

@@ -1,5 +1,11 @@
 import { expect, test } from 'bun:test';
-import type { BringsError, NodeId, Result, StructuralSelection } from '@vectojs/brings-core';
+import type {
+  AlignmentGuide,
+  BringsError,
+  NodeId,
+  Result,
+  StructuralSelection,
+} from '@vectojs/brings-core';
 import {
   pageDeltaBetween,
   viewportPoint,
@@ -174,6 +180,129 @@ test('begins empty and object clicks with replace, while Shift freezes a toggle 
   expect(descendantSession.finish(pointerSample(3, 20, 20), selectedDescendant.provider)).toEqual({
     kind: 'commit-selection',
     proposal: selectionProposal(start, [second]),
+  });
+});
+
+test('previews and commits the exact frozen Core move alignment result once', () => {
+  const start = interactionStart([first]);
+  const fixture = providerFixture({ ownerId: first });
+  const guides: readonly AlignmentGuide[] = [
+    {
+      axis: 'x',
+      sourceAnchor: 'max',
+      targetAnchor: 'min',
+      targetNodeId: second,
+      coordinate: 42,
+      minExtent: 10,
+      maxExtent: 90,
+    },
+  ];
+  const moveCalls: Array<Readonly<{ x: number; y: number }>> = [];
+  Object.assign(fixture.provider as object, {
+    move(
+      _start: SelectionInteractionStart,
+      proposal: SelectionProposal,
+      delta: { x: number; y: number },
+    ) {
+      moveCalls.push(delta);
+      return {
+        ok: true,
+        value: {
+          token: proposal.token,
+          selection: proposal.selection,
+          rawDelta: delta,
+          delta: { x: 42, y: delta.y },
+          guides,
+        },
+      };
+    },
+  });
+
+  const session = beginSession(start, pointerSample(91, 0, 0), fixture.provider);
+  const preview = session.update(pointerSample(91, 37, 8), fixture.provider);
+  expect(preview).toMatchObject({
+    kind: 'preview',
+    visual: {
+      movementDelta: { x: 42, y: 8 },
+      guides,
+    },
+  });
+  if (preview.kind !== 'preview') throw new Error('expected a move preview');
+  expect(Object.isFrozen(preview.visual.guides)).toBe(true);
+  expect(Object.isFrozen(preview.visual.guides?.[0])).toBe(true);
+
+  const commit = session.finish(pointerSample(91, 37, 8), fixture.provider);
+  expect(commit).toMatchObject({
+    kind: 'commit-move',
+    delta: { x: 42, y: 8 },
+    guides,
+  });
+  expect(moveCalls).toEqual([
+    { x: 37, y: 8 },
+    { x: 37, y: 8 },
+  ]);
+});
+
+test('clears move guides on unsnapped, stale, and cancelled samples', () => {
+  const start = interactionStart([first]);
+  const fixture = providerFixture({ ownerId: first });
+  const guides: readonly AlignmentGuide[] = [
+    {
+      axis: 'x',
+      sourceAnchor: 'min',
+      targetAnchor: 'max',
+      targetNodeId: second,
+      coordinate: 80,
+      minExtent: 10,
+      maxExtent: 90,
+    },
+  ];
+  Object.assign(fixture.provider as object, {
+    move(
+      _start: SelectionInteractionStart,
+      proposal: SelectionProposal,
+      delta: { x: number; y: number },
+    ) {
+      if (delta.x === 99) {
+        return { ok: false, error: { code: 'interaction.stale', path: '/interaction' } };
+      }
+      return {
+        ok: true,
+        value: {
+          token: proposal.token,
+          selection: proposal.selection,
+          rawDelta: delta,
+          delta,
+          guides: delta.x === 37 ? guides : [],
+        },
+      };
+    },
+  });
+
+  const session = beginSession(start, pointerSample(92, 0, 0), fixture.provider);
+  const snapped = session.update(pointerSample(92, 37, 0), fixture.provider);
+  expect(snapped).toMatchObject({ kind: 'preview', visual: { guides } });
+  const unsnapped = session.update(pointerSample(92, 70, 0), fixture.provider);
+  expect(unsnapped).toMatchObject({
+    kind: 'preview',
+    visual: { movementDelta: { x: 70, y: 0 } },
+  });
+  if (unsnapped.kind !== 'preview') throw new Error('expected an unsnapped move preview');
+  expect(unsnapped.visual.guides).toBeUndefined();
+  expect(session.cancel({ kind: 'escape' })).toEqual({ kind: 'discard', reason: 'escape' });
+
+  const pointerCancelled = beginSession(start, pointerSample(93, 0, 0), fixture.provider);
+  pointerCancelled.update(pointerSample(93, 37, 0), fixture.provider);
+  expect(pointerCancelled.cancel({ kind: 'pointercancel', pointerId: 93 })).toEqual({
+    kind: 'discard',
+    reason: 'pointercancel',
+  });
+
+  const stale = beginSession(start, pointerSample(94, 0, 0), fixture.provider);
+  expect(stale.update(pointerSample(94, 99, 0), fixture.provider)).toEqual({
+    kind: 'discard',
+    reason: 'stale',
+    error: { code: 'interaction.stale', path: '/interaction' },
   });
 });
 

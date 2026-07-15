@@ -47,6 +47,7 @@ const shell = new EditorShell(1, 1, {
   proposePointSelection: (start, point, mode) =>
     editor.proposePointSelection({ start, point, mode }),
   proposeAreaSelection: (start, rect, mode) => editor.proposeAreaSelection({ start, rect, mode }),
+  proposeMove: (start, proposal, delta) => editor.proposeMove({ start, proposal, delta }),
   commitSelection: (proposal) => editor.commitSelection(proposal),
   commitMove: (input) => editor.commitMove(input),
   beginResizeInteraction: () => editor.beginResizeInteraction(),

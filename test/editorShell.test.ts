@@ -167,6 +167,7 @@ function resizeProposal(
         delta,
       }),
     }),
+    guides: Object.freeze([]),
   });
 }
 

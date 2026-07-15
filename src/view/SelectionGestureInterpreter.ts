@@ -1,4 +1,5 @@
 import type {
+  AlignmentGuide,
   BringsError,
   EditorSnapshot,
   Matrix,
@@ -11,6 +12,7 @@ import type {
   ResizeInteractionProposal,
   SelectionInteractionToken,
   SelectionProposal,
+  MoveInteractionProposal,
 } from '../editor/selectionInteraction';
 import type { SelectionGestureEffect, SelectionGestureVisual } from './MarqueeSelectionSession';
 
@@ -21,7 +23,11 @@ type SnapshotGuard = () => boolean;
 export type SelectionGestureInterpreterPorts = Readonly<{
   commitSelection: (proposal: SelectionProposal) => Result<EditorSnapshot>;
   commitMove: (
-    input: Readonly<{ proposal: SelectionProposal; delta: PageDelta }>,
+    input: Readonly<{
+      proposal: SelectionProposal;
+      delta: PageDelta;
+      alignment?: MoveInteractionProposal;
+    }>,
   ) => Result<EditorSnapshot>;
   commitResize?: (proposal: ResizeInteractionProposal) => Result<EditorSnapshot>;
   reportInteractionError: (error: BringsError) => void;
@@ -65,6 +71,7 @@ function snapshotVisual(
   const marquee = guardedRead(() => visual.marquee, guard);
   const movementDelta = guardedRead(() => visual.movementDelta, guard);
   const resize = guardedRead(() => visual.resize, guard);
+  const guides = guardedRead(() => visual.guides, guard);
   const detachedSelection = snapshotSelection(selection, guard);
   const detachedMarquee =
     marquee === null
@@ -88,6 +95,7 @@ function snapshotVisual(
       marquee: null,
       movementDelta: null,
       resize: snapshotResize(resize, guard),
+      ...(guides === undefined ? {} : { guides: snapshotGuides(guides, guard) }),
     });
   }
   if (detachedDelta !== null) {
@@ -95,13 +103,39 @@ function snapshotVisual(
       selection: detachedSelection,
       marquee: null,
       movementDelta: detachedDelta,
+      ...(guides === undefined ? {} : { guides: snapshotGuides(guides, guard) }),
     });
   }
   return Object.freeze({
     selection: detachedSelection,
     marquee: detachedMarquee,
     movementDelta: null,
+    ...(guides === undefined ? {} : { guides: snapshotGuides(guides, guard) }),
   });
+}
+
+function snapshotGuides(
+  guides: readonly AlignmentGuide[] | undefined,
+  guard?: SnapshotGuard,
+): readonly AlignmentGuide[] {
+  if (guides === undefined) return Object.freeze([]);
+  const detached: AlignmentGuide[] = [];
+  const length = guardedRead(() => guides.length, guard);
+  for (let index = 0; index < length; index += 1) {
+    const guide = guardedRead(() => guides[index]!, guard);
+    detached.push(
+      Object.freeze({
+        axis: guardedRead(() => guide.axis, guard),
+        sourceAnchor: guardedRead(() => guide.sourceAnchor, guard),
+        targetAnchor: guardedRead(() => guide.targetAnchor, guard),
+        targetNodeId: guardedRead(() => guide.targetNodeId, guard),
+        coordinate: guardedRead(() => guide.coordinate, guard),
+        minExtent: guardedRead(() => guide.minExtent, guard),
+        maxExtent: guardedRead(() => guide.maxExtent, guard),
+      }),
+    );
+  }
+  return Object.freeze(detached);
 }
 
 function snapshotToken(
@@ -171,6 +205,7 @@ function snapshotResizeProposal(
   guard?: SnapshotGuard,
 ): ResizeInteractionProposal {
   const input = guardedRead(() => proposal.input, guard);
+  const guides = guardedRead(() => proposal.guides, guard);
   return Object.freeze({
     token: snapshotToken(
       guardedRead(() => proposal.token, guard),
@@ -197,7 +232,8 @@ function snapshotResizeProposal(
       guardedRead(() => proposal.resize, guard),
       guard,
     ),
-  });
+    ...(guides === undefined ? {} : { guides: snapshotGuides(guides, guard) }),
+  }) as ResizeInteractionProposal;
 }
 
 function sameSelection(left: StructuralSelection, right: StructuralSelection): boolean {
@@ -250,12 +286,33 @@ function sameResize(
   );
 }
 
+function sameGuides(
+  left: SelectionGestureVisual['guides'],
+  right: SelectionGestureVisual['guides'],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.length === right.length &&
+    left.every(
+      (guide, index) =>
+        guide.axis === right[index]?.axis &&
+        guide.sourceAnchor === right[index]?.sourceAnchor &&
+        guide.targetAnchor === right[index]?.targetAnchor &&
+        guide.targetNodeId === right[index]?.targetNodeId &&
+        guide.coordinate === right[index]?.coordinate &&
+        guide.minExtent === right[index]?.minExtent &&
+        guide.maxExtent === right[index]?.maxExtent,
+    )
+  );
+}
+
 function sameVisual(left: SelectionGestureVisual, right: SelectionGestureVisual): boolean {
   return (
     sameSelection(left.selection, right.selection) &&
     sameRect(left.marquee, right.marquee) &&
     sameDelta(left.movementDelta, right.movementDelta) &&
-    sameResize(left.resize, right.resize)
+    sameResize(left.resize, right.resize) &&
+    sameGuides(left.guides, right.guides)
   );
 }
 
@@ -320,6 +377,8 @@ export class SelectionGestureInterpreter {
                       (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>).delta,
                     current,
                   ),
+                  alignment: (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>)
+                    .alignment,
                 })
               : (this.ports.commitResize?.(
                   snapshotResizeProposal(proposal as ResizeInteractionProposal, current),

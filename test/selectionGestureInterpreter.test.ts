@@ -422,6 +422,7 @@ function resizeProposal(): ResizeInteractionProposal {
       fromCenter: false,
     },
     resize,
+    guides: [],
   };
 }
 

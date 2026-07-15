@@ -21,6 +21,7 @@ import type {
   ResizeInteractionProposal,
   ResizeInteractionStart,
   ResizeProposalProvider,
+  MoveInteractionProposal,
   SelectionInteractionStart,
   SelectionProposal,
   SelectionProposalProvider,
@@ -319,11 +320,13 @@ export interface EditorShellPorts {
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
   readonly proposeAreaSelection?: SelectionProposalProvider['area'];
+  readonly proposeMove?: SelectionProposalProvider['move'];
   readonly commitSelection?: (proposal: SelectionProposal) => Result<EditorSnapshot>;
   readonly commitMove?: (
     input: Readonly<{
       proposal: SelectionProposal;
       delta: PageDelta;
+      alignment?: MoveInteractionProposal;
     }>,
   ) => Result<EditorSnapshot>;
   readonly beginResizeInteraction?: () => Result<ResizeInteractionStart>;
@@ -345,11 +348,13 @@ type ResolvedEditorShellPorts = Readonly<{
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
   proposeAreaSelection: SelectionProposalProvider['area'];
+  proposeMove: NonNullable<SelectionProposalProvider['move']>;
   commitSelection: (proposal: SelectionProposal) => Result<EditorSnapshot>;
   commitMove: (
     input: Readonly<{
       proposal: SelectionProposal;
       delta: PageDelta;
+      alignment?: MoveInteractionProposal;
     }>,
   ) => Result<EditorSnapshot>;
   beginResizeInteraction: () => Result<ResizeInteractionStart>;
@@ -392,6 +397,19 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   createAt: () => unavailable('shape.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
+  proposeMove: (_start, proposal, delta) => ({
+    ok: true,
+    value: Object.freeze({
+      token: Object.freeze({ ...proposal.token }),
+      selection: Object.freeze({
+        nodeIds: Object.freeze([...proposal.selection.nodeIds]),
+        activeNodeId: proposal.selection.activeNodeId,
+      }),
+      rawDelta: Object.freeze({ x: delta.x, y: delta.y }) as PageDelta,
+      delta: Object.freeze({ x: delta.x, y: delta.y }) as PageDelta,
+      guides: Object.freeze([]),
+    }),
+  }),
   commitSelection: () => unavailable('selection.unavailable'),
   commitMove: () => unavailable('transform.unavailable'),
   beginResizeInteraction: () => unavailable('resize.unavailable'),
@@ -423,6 +441,7 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
       ports.proposePointSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposePointSelection,
     proposeAreaSelection:
       ports.proposeAreaSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposeAreaSelection,
+    proposeMove: ports.proposeMove ?? DEFAULT_EDITOR_SHELL_PORTS.proposeMove,
     commitSelection: ports.commitSelection ?? DEFAULT_EDITOR_SHELL_PORTS.commitSelection,
     commitMove: ports.commitMove ?? DEFAULT_EDITOR_SHELL_PORTS.commitMove,
     beginResizeInteraction:
@@ -640,6 +659,7 @@ export class EditorShell extends Entity {
     this.selectionProvider = {
       point: (start, point, mode) => this.ports.proposePointSelection(start, point, mode),
       area: (start, rect, mode) => this.ports.proposeAreaSelection(start, rect, mode),
+      move: (start, proposal, delta) => this.ports.proposeMove(start, proposal, delta),
     };
     this.resizeProvider = {
       resize: (start, input) => this.ports.proposeResize({ start, input }),
