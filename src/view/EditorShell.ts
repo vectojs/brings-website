@@ -1022,7 +1022,7 @@ export class EditorShell extends Entity {
       20,
       !this.authoringEnabled,
     );
-    this.title.setFrame(20, 35, true);
+    this.title.setFrame(20, 28, true);
     this.selectTool.setFrame(120, 12, this.activeTool === 'select');
     this.frameTool.setFrame(216, 12, this.activeTool === 'frame');
     this.rectangleTool.setFrame(312, 12, this.activeTool === 'rectangle');
@@ -1153,6 +1153,7 @@ export class EditorShell extends Entity {
       input.width = width;
       input.height = show ? 28 : 0;
       input.interactive = show;
+      input.opacity = show ? 1 : 0;
     };
     setInput(this.nameInput, 58);
     setInput(this.opacityInput, 94);
@@ -1161,9 +1162,11 @@ export class EditorShell extends Entity {
     this.visibleToggle.x = 20;
     this.visibleToggle.y = 208;
     this.visibleToggle.interactive = visible;
+    this.visibleToggle.opacity = visible ? 1 : 0;
     this.lockedToggle.x = 120;
     this.lockedToggle.y = 208;
     this.lockedToggle.interactive = visible;
+    this.lockedToggle.opacity = visible ? 1 : 0;
   }
 
   private syncProperties(): void {

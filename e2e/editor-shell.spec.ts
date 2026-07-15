@@ -1049,7 +1049,10 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   await page.mouse.down();
   await page.mouse.move(thresholdStart.x + 4 * pageScale, thresholdStart.y);
   const threshold = await readDebug(page);
-  expect(threshold.interaction.phase).toBe('marquee');
+  expect(
+    threshold.interaction.phase,
+    `threshold interaction: ${JSON.stringify(threshold.interaction)}`,
+  ).toBe('marquee');
   expect(threshold.interaction.start?.viewport.x).toBeCloseTo(200, 3);
   expect(threshold.interaction.start?.viewport.y).toBeCloseTo(100, 3);
   expect(threshold.interaction.start?.page.x).toBeCloseTo(200, 3);
