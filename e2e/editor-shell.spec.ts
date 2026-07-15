@@ -1529,7 +1529,6 @@ test('discards resize on Escape, pointercancel, and a narrow responsive transiti
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole('group', { name: 'Properties' })).toBeVisible();
   southEast = await projectedPoint(page, { x: 500, y: 420 });
-  destination = await projectedPoint(page, { x: 530, y: 440 });
   await page.mouse.move(southEast.x, southEast.y);
   await page.mouse.down();
   await expect.poll(async () => (await readDebug(page)).interaction.phase).toBe('resizing');
