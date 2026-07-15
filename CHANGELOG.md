@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added deterministic edge and centre snapping for move and axis-aligned
+  resize interactions, including dynamic Shift/Alt modifier sampling,
+  canvas-native alignment guides, exact one-command commits, cancellation
+  cleanup, and undo/redo browser coverage across Chromium, Firefox, WebKit,
+  high-DPR rendering, and emulated page scale.
+- Upgraded to Brings Core 0.10.1 so move-guide extents are derived from the
+  final snapped geometry shown on the canvas.
 - Corrected CI and local deployment to target the existing Cloudflare Pages
   project `brings` while retaining `brings-website.pages.dev` and
   `brings-website.vectojs.org` as the public domains.

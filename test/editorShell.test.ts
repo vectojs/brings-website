@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import type {
+  AlignmentGuide,
   EditorSnapshot,
   Matrix,
   NodeId,
@@ -26,6 +27,23 @@ const first = '11111111-1111-4111-8111-111111111111' as NodeId;
 const second = '22222222-2222-4222-8222-222222222222' as NodeId;
 const third = '33333333-3333-4333-8333-333333333333' as NodeId;
 const fourth = '44444444-4444-4444-8444-444444444444' as NodeId;
+
+function alignmentGuide(
+  axis: AlignmentGuide['axis'],
+  coordinate: number,
+  minExtent: number,
+  maxExtent: number,
+): AlignmentGuide {
+  return Object.freeze({
+    axis,
+    sourceAnchor: 'center',
+    targetAnchor: 'center',
+    targetNodeId: third,
+    coordinate,
+    minExtent,
+    maxExtent,
+  });
+}
 
 const resizeHandles = Object.freeze([
   { handle: 'north-west', point: { x: 100, y: 120 } },
@@ -144,6 +162,7 @@ function resizeProposal(
   start: ResizeInteractionStart,
   input: SelectionResizeProposalInput,
   delta: Matrix = Object.freeze([2, 0, 0, 3, -100, -240]),
+  guides: readonly AlignmentGuide[] = Object.freeze([]),
 ): ResizeInteractionProposal {
   return Object.freeze({
     token: start.token,
@@ -167,6 +186,7 @@ function resizeProposal(
         delta,
       }),
     }),
+    guides,
   });
 }
 
@@ -174,6 +194,7 @@ function resizePorts(
   input: Readonly<{
     start?: ResizeInteractionStart;
     delta?: Matrix;
+    guides?: readonly AlignmentGuide[];
     snapshot?: () => EditorSnapshot;
   }> = {},
 ) {
@@ -200,7 +221,7 @@ function resizePorts(
         value: Readonly<{ start: ResizeInteractionStart; input: SelectionResizeProposalInput }>,
       ) {
         samples.push(value.input);
-        const proposed = resizeProposal(value.start, value.input, input.delta);
+        const proposed = resizeProposal(value.start, value.input, input.delta, input.guides);
         proposals.push(proposed);
         return { ok: true as const, value: proposed };
       },
@@ -1139,6 +1160,163 @@ test('renders preview movement once per selected branch and paints marquee after
   ]);
 });
 
+test('paints finite page-space alignment guides after content and before selection handles', () => {
+  const guides = Object.freeze([
+    alignmentGuide('x', 204, 80, 260),
+    alignmentGuide('y', 176, 64, 240),
+    alignmentGuide('x', Number.NaN, 0, 100),
+  ]);
+  const state = resizePorts({ guides });
+  const shell = new EditorShell(1440, 900, state.ports);
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 71, x: 200, y: 200 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 71, x: 210, y: 210 });
+
+  expect(shell.interactionSnapshot().visual?.guides).toEqual(guides);
+  const recording = recordingRenderer();
+  shell.render(recording.renderer);
+  const verticalIndex = recording.calls.findIndex(
+    (call) => call.method === 'moveTo' && call.args[0] === 204 && call.args[1] === 80,
+  );
+  const horizontalIndex = recording.calls.findIndex(
+    (call) => call.method === 'moveTo' && call.args[0] === 64 && call.args[1] === 176,
+  );
+  const resizeOutlineIndex = recording.calls.findLastIndex(
+    (call) => call.method === 'roundRect' && call.args[2] === 8 && call.args[3] === 8,
+  );
+
+  expect(verticalIndex).toBeGreaterThan(-1);
+  expect(recording.calls.slice(verticalIndex, verticalIndex + 3)).toEqual([
+    { method: 'moveTo', args: [204, 80] },
+    { method: 'lineTo', args: [204, 260] },
+    { method: 'stroke', args: ['#2563eb', 1] },
+  ]);
+  expect(horizontalIndex).toBeGreaterThan(verticalIndex);
+  expect(recording.calls.slice(horizontalIndex, horizontalIndex + 3)).toEqual([
+    { method: 'moveTo', args: [64, 176] },
+    { method: 'lineTo', args: [240, 176] },
+    { method: 'stroke', args: ['#2563eb', 1] },
+  ]);
+  expect(resizeOutlineIndex).toBeGreaterThan(horizontalIndex);
+  expect(recording.calls.filter((call) => call.method === 'lineTo')).toHaveLength(2);
+});
+
+test('clears alignment guide painting after an unsnapped preview and cancellation', () => {
+  const start = interactionStart([first]);
+  let guides: readonly AlignmentGuide[] = Object.freeze([alignmentGuide('x', 204, 80, 260)]);
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot([first]),
+    beginSelectionInteraction: () => start,
+    proposePointSelection: () => ({
+      ok: true,
+      value: { ownerId: first, proposal: proposal(start, [first]) },
+    }),
+    proposeMove: (_captured, selection, delta) => ({
+      ok: true,
+      value: Object.freeze({
+        token: selection.token,
+        selection: selection.selection,
+        rawDelta: Object.freeze({ ...delta }),
+        delta: Object.freeze({ ...delta }),
+        guides,
+      }),
+    }),
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 72, x: 120, y: 140 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 72, x: 130, y: 150 });
+  const snapped = recordingRenderer();
+  shell.render(snapped.renderer);
+  expect(snapped.calls.some((call) => call.method === 'lineTo')).toBe(true);
+
+  guides = Object.freeze([]);
+  dispatchPointer(shell, 'pointermove', { pointerId: 72, x: 140, y: 160 });
+  const unsnapped = recordingRenderer();
+  shell.render(unsnapped.renderer);
+  expect(shell.interactionSnapshot().visual?.guides ?? []).toEqual([]);
+  expect(unsnapped.calls.some((call) => call.method === 'lineTo')).toBe(false);
+
+  guides = Object.freeze([alignmentGuide('y', 176, 64, 240)]);
+  dispatchPointer(shell, 'pointermove', { pointerId: 72, x: 130, y: 150 });
+  dispatchPointer(shell, 'pointercancel', { pointerId: 72, x: 130, y: 150 });
+  const canceled = recordingRenderer();
+  shell.render(canceled.renderer);
+  expect(shell.interactionSnapshot().visual).toBeNull();
+  expect(canceled.calls.some((call) => call.method === 'lineTo')).toBe(false);
+});
+
+test('discards snapped move and resize previews before switching tools', () => {
+  const guides = Object.freeze([alignmentGuide('x', 204, 80, 260)]);
+  const moveStart = interactionStart([first]);
+  let moveCommits = 0;
+  const moveShell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot([first]),
+    beginSelectionInteraction: () => moveStart,
+    proposePointSelection: () => ({
+      ok: true,
+      value: { ownerId: first, proposal: proposal(moveStart, [first]) },
+    }),
+    proposeMove: (_captured, selection, delta) => ({
+      ok: true,
+      value: Object.freeze({
+        token: selection.token,
+        selection: selection.selection,
+        rawDelta: Object.freeze({ ...delta }),
+        delta: Object.freeze({ ...delta }),
+        guides,
+      }),
+    }),
+    commitMove: () => {
+      moveCommits += 1;
+      return { ok: true, value: editorSnapshot([first]) };
+    },
+  });
+
+  dispatchPointer(moveShell, 'pointerdown', { pointerId: 73, x: 120, y: 140 });
+  dispatchPointer(moveShell, 'pointermove', { pointerId: 73, x: 130, y: 150 });
+  expect(moveShell.interactionSnapshot().visual?.guides).toEqual(guides);
+  const frameTool = childById(moveShell, 'brings-frame-tool');
+  frameTool.dispatchEvent(new VectoJSEvent('pointerdown', frameTool));
+
+  expect(moveShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+  expect(frameTool.getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Frame tool selected',
+  });
+  const moved = recordingRenderer();
+  moveShell.render(moved.renderer);
+  expect(moved.calls.some((call) => call.method === 'lineTo')).toBe(false);
+  dispatchPointer(moveShell, 'pointerup', { pointerId: 73, x: 130, y: 150 });
+  expect(moveCommits).toBe(0);
+
+  const resizeState = resizePorts({ guides });
+  const resizeShell = new EditorShell(1440, 900, resizeState.ports);
+  dispatchPointer(resizeShell, 'pointerdown', { pointerId: 74, x: 200, y: 200 });
+  dispatchPointer(resizeShell, 'pointermove', { pointerId: 74, x: 220, y: 220 });
+  expect(resizeShell.interactionSnapshot().visual?.guides).toEqual(guides);
+  const rectangleTool = childById(resizeShell, 'brings-rectangle-tool');
+  rectangleTool.dispatchEvent(new VectoJSEvent('pointerdown', rectangleTool));
+
+  expect(resizeShell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    visual: null,
+  });
+  expect(rectangleTool.getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Rectangle tool selected',
+  });
+  const resized = recordingRenderer();
+  resizeShell.render(resized.renderer);
+  expect(resized.calls.some((call) => call.method === 'lineTo')).toBe(false);
+  dispatchPointer(resizeShell, 'pointerup', { pointerId: 74, x: 220, y: 220 });
+  expect(resizeState.commits).toEqual([]);
+});
+
 test('renders axis-aligned node scale instead of dropping durable affine terms', () => {
   const snapshot = editorSnapshot([first]);
   const scaled: EditorSnapshot = {
@@ -1431,7 +1609,7 @@ test('prioritizes an Alt resize hit while preserving unsupported Alt behavior on
   expect(miss.commits).toEqual([]);
 });
 
-test('routes only the resize owner and samples Shift and Alt dynamically through one commit', () => {
+test('routes only the resize owner and commits the last displayed modifier sample', () => {
   const state = resizePorts();
   const errors: Array<Readonly<{ code: string; path: string }>> = [];
   const shell = new EditorShell(1440, 900, {
@@ -1478,11 +1656,8 @@ test('routes only the resize owner and samples Shift and Alt dynamically through
   expect(errors).toEqual([]);
   expect(
     state.samples.map(({ preserveAspectRatio, fromCenter }) => [preserveAspectRatio, fromCenter]),
-  ).toEqual([
-    [true, false],
-    [false, true],
-  ]);
-  expect(state.commits).toHaveLength(1);
+  ).toEqual([[true, false]]);
+  expect(state.commits).toEqual([state.proposals[0]]);
   dispatchPointer(shell, 'pointerup', { pointerId: 86, x: 250, y: 240 });
   expect(state.commits).toHaveLength(1);
 });

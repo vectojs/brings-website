@@ -1,7 +1,12 @@
 import { expect, test } from 'bun:test';
-import type { BringsError, NodeId, Result, StructuralSelection } from '@vectojs/brings-core';
+import type {
+  AlignmentGuide,
+  BringsError,
+  NodeId,
+  Result,
+  StructuralSelection,
+} from '@vectojs/brings-core';
 import {
-  pageDeltaBetween,
   viewportPoint,
   viewportToPagePoint,
   type EditorPagePoint,
@@ -177,6 +182,126 @@ test('begins empty and object clicks with replace, while Shift freezes a toggle 
   });
 });
 
+test('previews and commits the exact frozen Core move alignment result once', () => {
+  const start = interactionStart([first]);
+  const fixture = providerFixture({ ownerId: first });
+  const guides: readonly AlignmentGuide[] = [
+    {
+      axis: 'x',
+      sourceAnchor: 'max',
+      targetAnchor: 'min',
+      targetNodeId: second,
+      coordinate: 42,
+      minExtent: 10,
+      maxExtent: 90,
+    },
+  ];
+  const moveCalls: Array<Readonly<{ x: number; y: number }>> = [];
+  Object.assign(fixture.provider as object, {
+    move(
+      _start: SelectionInteractionStart,
+      proposal: SelectionProposal,
+      delta: { x: number; y: number },
+    ) {
+      moveCalls.push(delta);
+      return {
+        ok: true,
+        value: {
+          token: proposal.token,
+          selection: proposal.selection,
+          rawDelta: delta,
+          delta: { x: 42, y: delta.y },
+          guides,
+        },
+      };
+    },
+  });
+
+  const session = beginSession(start, pointerSample(91, 0, 0), fixture.provider);
+  const preview = session.update(pointerSample(91, 37, 8), fixture.provider);
+  expect(preview).toMatchObject({
+    kind: 'preview',
+    visual: {
+      movementDelta: { x: 42, y: 8 },
+      guides,
+    },
+  });
+  if (preview.kind !== 'preview') throw new Error('expected a move preview');
+  expect(Object.isFrozen(preview.visual.guides)).toBe(true);
+  expect(Object.isFrozen(preview.visual.guides?.[0])).toBe(true);
+
+  const commit = session.finish(pointerSample(91, 99, 44, true), fixture.provider);
+  expect(commit).toMatchObject({
+    kind: 'commit-move',
+    delta: { x: 42, y: 8 },
+    guides,
+  });
+  expect(moveCalls).toEqual([{ x: 37, y: 8 }]);
+});
+
+test('clears move guides on unsnapped, stale, and cancelled samples', () => {
+  const start = interactionStart([first]);
+  const fixture = providerFixture({ ownerId: first });
+  const guides: readonly AlignmentGuide[] = [
+    {
+      axis: 'x',
+      sourceAnchor: 'min',
+      targetAnchor: 'max',
+      targetNodeId: second,
+      coordinate: 80,
+      minExtent: 10,
+      maxExtent: 90,
+    },
+  ];
+  Object.assign(fixture.provider as object, {
+    move(
+      _start: SelectionInteractionStart,
+      proposal: SelectionProposal,
+      delta: { x: number; y: number },
+    ) {
+      if (delta.x === 99) {
+        return { ok: false, error: { code: 'interaction.stale', path: '/interaction' } };
+      }
+      return {
+        ok: true,
+        value: {
+          token: proposal.token,
+          selection: proposal.selection,
+          rawDelta: delta,
+          delta,
+          guides: delta.x === 37 ? guides : [],
+        },
+      };
+    },
+  });
+
+  const session = beginSession(start, pointerSample(92, 0, 0), fixture.provider);
+  const snapped = session.update(pointerSample(92, 37, 0), fixture.provider);
+  expect(snapped).toMatchObject({ kind: 'preview', visual: { guides } });
+  const unsnapped = session.update(pointerSample(92, 70, 0), fixture.provider);
+  expect(unsnapped).toMatchObject({
+    kind: 'preview',
+    visual: { movementDelta: { x: 70, y: 0 } },
+  });
+  if (unsnapped.kind !== 'preview') throw new Error('expected an unsnapped move preview');
+  expect(unsnapped.visual.guides).toBeUndefined();
+  expect(session.cancel({ kind: 'escape' })).toEqual({ kind: 'discard', reason: 'escape' });
+
+  const pointerCancelled = beginSession(start, pointerSample(93, 0, 0), fixture.provider);
+  pointerCancelled.update(pointerSample(93, 37, 0), fixture.provider);
+  expect(pointerCancelled.cancel({ kind: 'pointercancel', pointerId: 93 })).toEqual({
+    kind: 'discard',
+    reason: 'pointercancel',
+  });
+
+  const stale = beginSession(start, pointerSample(94, 0, 0), fixture.provider);
+  expect(stale.update(pointerSample(94, 99, 0), fixture.provider)).toEqual({
+    kind: 'discard',
+    reason: 'stale',
+    error: { code: 'interaction.stale', path: '/interaction' },
+  });
+});
+
 test('stays pending below and enters marquee at the four logical-pixel squared threshold', () => {
   const start = interactionStart();
   const { provider, log } = providerFixture({ ownerId: null });
@@ -338,24 +463,19 @@ test('obtains an object movement proposal once and reuses it for later deltas', 
   expect(log.point.map(({ mode }) => mode)).toEqual(['replace', 'replace']);
 });
 
-test('finishes marquee and object movement with exactly one matching commit', () => {
+test('finishes marquee and keeps a no-preview object gesture as selection', () => {
   const start = interactionStart();
   const marquee = providerFixture({ ownerId: null });
   const moving = providerFixture({ ownerId: third });
   const marqueeSession = beginSession(start, pointerSample(14, 10, 10), marquee.provider);
   const movingSession = beginSession(start, pointerSample(15, 10, 10), moving.provider);
-  const expectedDelta = unwrap(
-    pageDeltaBetween(pointerSample(15, 10, 10).pagePoint, pointerSample(15, 16, 13).pagePoint),
-  );
-
   expect(marqueeSession.finish(pointerSample(14, 4, 3, true), marquee.provider)).toEqual({
     kind: 'commit-selection',
     proposal: selectionProposal(start, [first, second, third]),
   });
   expect(movingSession.finish(pointerSample(15, 16, 13), moving.provider)).toEqual({
-    kind: 'commit-move',
+    kind: 'commit-selection',
     proposal: selectionProposal(start, [third]),
-    delta: expectedDelta,
   });
   expect(marqueeSession.finish(pointerSample(14, 4, 3), marquee.provider)).toEqual({
     kind: 'ignore',
@@ -365,15 +485,15 @@ test('finishes marquee and object movement with exactly one matching commit', ()
   });
 });
 
-test('commits a drag proposal as selection when a moving gesture returns to zero delta', () => {
+test('commits the last displayed move when pointerup returns to the origin', () => {
   const start = interactionStart();
   const { provider } = providerFixture({ ownerId: third });
   const session = beginSession(start, pointerSample(16, 10, 10, true), provider);
   expect(session.update(pointerSample(16, 14, 10), provider).kind).toBe('preview');
 
-  expect(session.finish(pointerSample(16, 10, 10, false), provider)).toEqual({
-    kind: 'commit-selection',
-    proposal: selectionProposal(start, [first, second, third]),
+  expect(session.finish(pointerSample(16, 10, 10, false), provider)).toMatchObject({
+    kind: 'commit-move',
+    delta: { x: 4, y: 0 },
   });
 });
 
@@ -875,7 +995,7 @@ test('detaches and freezes move proposals, visuals, derived values, and errors',
   expect(committed).toMatchObject({
     kind: 'commit-move',
     proposal: { selection: { nodeIds: [first, second, third] } },
-    delta: { x: 8, y: 0 },
+    delta: { x: 4, y: 0 },
   });
   if (committed.kind !== 'commit-move') throw new Error('move fixture failed');
   expect(Object.isFrozen(committed)).toBe(true);

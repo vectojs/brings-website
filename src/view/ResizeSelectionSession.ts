@@ -1,4 +1,5 @@
 import type {
+  AlignmentGuide,
   BringsError,
   Matrix,
   NodeId,
@@ -208,10 +209,34 @@ function snapshotInput(
   });
 }
 
+function snapshotGuides(
+  guides: readonly AlignmentGuide[],
+  guard?: SnapshotGuard,
+): readonly AlignmentGuide[] {
+  const detached: AlignmentGuide[] = [];
+  const length = guardedRead(() => guides.length, guard);
+  for (let index = 0; index < length; index += 1) {
+    const guide = guardedRead(() => guides[index]!, guard);
+    detached.push(
+      Object.freeze({
+        axis: guardedRead(() => guide.axis, guard),
+        sourceAnchor: guardedRead(() => guide.sourceAnchor, guard),
+        targetAnchor: guardedRead(() => guide.targetAnchor, guard),
+        targetNodeId: guardedRead(() => guide.targetNodeId, guard),
+        coordinate: guardedRead(() => guide.coordinate, guard),
+        minExtent: guardedRead(() => guide.minExtent, guard),
+        maxExtent: guardedRead(() => guide.maxExtent, guard),
+      }),
+    );
+  }
+  return Object.freeze(detached);
+}
+
 function snapshotProposal(
   proposal: ResizeInteractionProposal,
   guard?: SnapshotGuard,
 ): ResizeInteractionProposal {
+  const guides = guardedRead(() => proposal.guides, guard);
   return Object.freeze({
     token: snapshotToken(
       guardedRead(() => proposal.token, guard),
@@ -229,7 +254,8 @@ function snapshotProposal(
       guardedRead(() => proposal.resize, guard),
       guard,
     ),
-  });
+    guides: snapshotGuides(guides, guard),
+  }) as ResizeInteractionProposal;
 }
 
 function snapshotProviderResult(
@@ -260,6 +286,7 @@ function freezePreview(proposal: ResizeInteractionProposal): SelectionGestureEff
     marquee: null,
     movementDelta: null,
     resize: proposal.resize,
+    ...(proposal.guides.length === 0 ? {} : { guides: proposal.guides }),
   });
   return Object.freeze({ kind: 'preview', visual });
 }
@@ -354,9 +381,24 @@ export class ResizeSelectionSession {
   /** Commit the latest valid non-identity proposal exactly once. */
   public finish(
     sample: ResizePointerSample,
-    provider: ResizeProposalProvider,
+    _provider: ResizeProposalProvider,
   ): SelectionGestureEffect {
-    return this.advance(sample, provider, true);
+    if (this.phase === 'terminal') return IGNORE_EFFECT;
+    const version = this.stateVersion;
+    try {
+      const pointerId = guardedRead(
+        () => sample.pointerId,
+        () => this.isCurrent(version),
+      );
+      if (pointerId !== this.ownerPointerId) return IGNORE_EFFECT;
+    } catch (error) {
+      if (error === INTERRUPTED) return IGNORE_EFFECT;
+      return this.markDiscard(
+        'error',
+        Object.freeze({ code: 'interaction.coordinate-invalid', path: '/resize/pointerId' }),
+      );
+    }
+    return this.latestProposal === null ? this.markDiscard('no-change') : this.commitLatest();
   }
 
   /** Cancel the owner stream without mutating durable Core state. */

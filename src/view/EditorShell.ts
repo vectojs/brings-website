@@ -6,6 +6,7 @@ import {
   type VectoJSEvent,
 } from '@vectojs/core';
 import type {
+  AlignmentGuide,
   BringsError,
   EditorSnapshot,
   Matrix,
@@ -21,6 +22,7 @@ import type {
   ResizeInteractionProposal,
   ResizeInteractionStart,
   ResizeProposalProvider,
+  MoveInteractionProposal,
   SelectionInteractionStart,
   SelectionProposal,
   SelectionProposalProvider,
@@ -267,6 +269,23 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
   const marquee = visual.marquee;
   const movementDelta = visual.movementDelta;
   const resize = visual.resize;
+  const guides = visual.guides;
+  const detachedGuides =
+    guides === undefined
+      ? undefined
+      : Object.freeze(
+          guides.map((guide) =>
+            Object.freeze({
+              axis: guide.axis,
+              sourceAnchor: guide.sourceAnchor,
+              targetAnchor: guide.targetAnchor,
+              targetNodeId: guide.targetNodeId,
+              coordinate: guide.coordinate,
+              minExtent: guide.minExtent,
+              maxExtent: guide.maxExtent,
+            }),
+          ),
+        );
   const selection = Object.freeze({
     nodeIds: Object.freeze([...visual.selection.nodeIds]),
     activeNodeId: visual.selection.activeNodeId,
@@ -289,6 +308,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
       marquee: null,
       movementDelta: null,
       resize: detachedResize,
+      ...(detachedGuides === undefined ? {} : { guides: detachedGuides }),
     });
   }
   if (movementDelta !== null) {
@@ -296,6 +316,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
       selection,
       marquee: null,
       movementDelta: Object.freeze({ x: movementDelta.x, y: movementDelta.y }) as PageDelta,
+      ...(detachedGuides === undefined ? {} : { guides: detachedGuides }),
     });
   }
   return Object.freeze({
@@ -310,6 +331,7 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
             height: marquee.height,
           }),
     movementDelta: null,
+    ...(detachedGuides === undefined ? {} : { guides: detachedGuides }),
   });
 }
 
@@ -319,11 +341,13 @@ export interface EditorShellPorts {
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
   readonly proposeAreaSelection?: SelectionProposalProvider['area'];
+  readonly proposeMove?: SelectionProposalProvider['move'];
   readonly commitSelection?: (proposal: SelectionProposal) => Result<EditorSnapshot>;
   readonly commitMove?: (
     input: Readonly<{
       proposal: SelectionProposal;
       delta: PageDelta;
+      alignment?: MoveInteractionProposal;
     }>,
   ) => Result<EditorSnapshot>;
   readonly beginResizeInteraction?: () => Result<ResizeInteractionStart>;
@@ -345,11 +369,13 @@ type ResolvedEditorShellPorts = Readonly<{
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
   proposeAreaSelection: SelectionProposalProvider['area'];
+  proposeMove: NonNullable<SelectionProposalProvider['move']>;
   commitSelection: (proposal: SelectionProposal) => Result<EditorSnapshot>;
   commitMove: (
     input: Readonly<{
       proposal: SelectionProposal;
       delta: PageDelta;
+      alignment?: MoveInteractionProposal;
     }>,
   ) => Result<EditorSnapshot>;
   beginResizeInteraction: () => Result<ResizeInteractionStart>;
@@ -392,6 +418,19 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   createAt: () => unavailable('shape.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
+  proposeMove: (_start, proposal, delta) => ({
+    ok: true,
+    value: Object.freeze({
+      token: Object.freeze({ ...proposal.token }),
+      selection: Object.freeze({
+        nodeIds: Object.freeze([...proposal.selection.nodeIds]),
+        activeNodeId: proposal.selection.activeNodeId,
+      }),
+      rawDelta: Object.freeze({ x: delta.x, y: delta.y }) as PageDelta,
+      delta: Object.freeze({ x: delta.x, y: delta.y }) as PageDelta,
+      guides: Object.freeze([]),
+    }),
+  }),
   commitSelection: () => unavailable('selection.unavailable'),
   commitMove: () => unavailable('transform.unavailable'),
   beginResizeInteraction: () => unavailable('resize.unavailable'),
@@ -423,6 +462,7 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
       ports.proposePointSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposePointSelection,
     proposeAreaSelection:
       ports.proposeAreaSelection ?? DEFAULT_EDITOR_SHELL_PORTS.proposeAreaSelection,
+    proposeMove: ports.proposeMove ?? DEFAULT_EDITOR_SHELL_PORTS.proposeMove,
     commitSelection: ports.commitSelection ?? DEFAULT_EDITOR_SHELL_PORTS.commitSelection,
     commitMove: ports.commitMove ?? DEFAULT_EDITOR_SHELL_PORTS.commitMove,
     beginResizeInteraction:
@@ -605,16 +645,13 @@ export class EditorShell extends Entity {
     '#475569',
   );
   private readonly selectTool = new ToolbarButton('brings-select-tool', 'Select', () => {
-    this.activeTool = 'select';
-    this.scene?.markDirty();
+    this.activateTool('select');
   });
   private readonly frameTool = new ToolbarButton('brings-frame-tool', 'Frame', () => {
-    this.activeTool = 'frame';
-    this.scene?.markDirty();
+    this.activateTool('frame');
   });
   private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
-    this.activeTool = 'rectangle';
-    this.scene?.markDirty();
+    this.activateTool('rectangle');
   });
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
@@ -640,6 +677,7 @@ export class EditorShell extends Entity {
     this.selectionProvider = {
       point: (start, point, mode) => this.ports.proposePointSelection(start, point, mode),
       area: (start, rect, mode) => this.ports.proposeAreaSelection(start, rect, mode),
+      move: (start, proposal, delta) => this.ports.proposeMove(start, proposal, delta),
     };
     this.resizeProvider = {
       resize: (start, input) => this.ports.proposeResize({ start, input }),
@@ -949,6 +987,7 @@ export class EditorShell extends Entity {
       const root = nodes.get(rootId);
       if (root !== undefined) renderNode(root, IDENTITY_MATRIX, 1, false, false);
     }
+    this.renderAlignmentGuides(renderer, visual?.guides ?? []);
     this.renderResizeOverlay(renderer, visual);
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
       const source = visual.marquee;
@@ -963,6 +1002,31 @@ export class EditorShell extends Entity {
       renderer.fill('rgba(37, 99, 235, 0.12)');
       renderer.stroke('#2563eb', 1);
       renderer.restore();
+    }
+    renderer.restore();
+  }
+
+  private renderAlignmentGuides(renderer: IRenderer, guides: readonly AlignmentGuide[]): void {
+    renderer.save();
+    renderer.setGlobalAlpha(1);
+    for (const guide of guides) {
+      if (
+        (guide.axis !== 'x' && guide.axis !== 'y') ||
+        !Number.isFinite(guide.coordinate) ||
+        !Number.isFinite(guide.minExtent) ||
+        !Number.isFinite(guide.maxExtent)
+      ) {
+        continue;
+      }
+      renderer.beginPath();
+      if (guide.axis === 'x') {
+        renderer.moveTo(guide.coordinate, guide.minExtent);
+        renderer.lineTo(guide.coordinate, guide.maxExtent);
+      } else {
+        renderer.moveTo(guide.minExtent, guide.coordinate);
+        renderer.lineTo(guide.maxExtent, guide.coordinate);
+      }
+      renderer.stroke('#2563eb', 1);
     }
     renderer.restore();
   }
@@ -1467,6 +1531,35 @@ export class EditorShell extends Entity {
     this.resizeInteraction = null;
     this.terminalInteraction = terminal.phase === 'terminal' ? terminal : null;
     return true;
+  }
+
+  private activateTool(tool: CanvasTool): void {
+    if (tool === this.activeTool) return;
+
+    // A tool switch is a transactional boundary: no preview owned by the old
+    // tool may remain visible or accept a late terminal pointer event.
+    this.pointerRouteVersion += 1;
+    const resizeSession = this.resizeSession;
+    if (resizeSession !== null) {
+      const pointerId = this.resizePointerId;
+      const effect = resizeSession.cancel({ kind: 'escape' });
+      this.closeResizeSession(resizeSession);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.selectionInterpreter.apply(effect);
+    } else {
+      const selectionSession = this.selectionSession;
+      if (selectionSession !== null) {
+        const pointerId = this.selectionPointerId;
+        const effect = selectionSession.cancel({ kind: 'escape' });
+        this.closeSelectionSession(selectionSession);
+        if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+        this.selectionInterpreter.apply(effect);
+      }
+    }
+
+    this.activeTool = tool;
+    this.applyLayout();
+    this.scene?.markDirty();
   }
 
   private routeEditorShortcut(event: VectoJSEvent): void {

@@ -1,4 +1,5 @@
 import type {
+  AlignmentGuide,
   BringsError,
   NodeId,
   PageRect,
@@ -19,6 +20,7 @@ import type {
   SelectionInteractionToken,
   SelectionProposal,
   SelectionProposalProvider,
+  MoveInteractionProposal,
   ResizeInteractionProposal,
 } from '../editor/selectionInteraction';
 
@@ -74,6 +76,7 @@ export type SelectionGestureSessionSnapshot = Readonly<{
 /** Transient canvas-native state produced without mutating Brings Core. */
 export type SelectionGestureVisual = Readonly<{
   selection: StructuralSelection;
+  guides?: readonly AlignmentGuide[];
 }> &
   (
     | Readonly<{
@@ -101,6 +104,8 @@ export type SelectionGestureEffect =
       kind: 'commit-move';
       proposal: SelectionProposal;
       delta: PageDelta;
+      alignment?: MoveInteractionProposal;
+      guides?: readonly AlignmentGuide[];
     }>
   | Readonly<{ kind: 'commit-resize'; proposal: ResizeInteractionProposal }>
   | Readonly<{
@@ -226,6 +231,51 @@ function snapshotPageDelta(delta: PageDelta): PageDelta {
   return Object.freeze({ x, y }) as PageDelta;
 }
 
+function snapshotGuides(
+  guides: readonly AlignmentGuide[],
+  guard?: SnapshotGuard,
+): readonly AlignmentGuide[] {
+  const detached: AlignmentGuide[] = [];
+  const length = guardedRead(() => guides.length, guard);
+  for (let index = 0; index < length; index += 1) {
+    const guide = guardedRead(() => guides[index]!, guard);
+    detached.push(
+      Object.freeze({
+        axis: guardedRead(() => guide.axis, guard),
+        sourceAnchor: guardedRead(() => guide.sourceAnchor, guard),
+        targetAnchor: guardedRead(() => guide.targetAnchor, guard),
+        targetNodeId: guardedRead(() => guide.targetNodeId, guard),
+        coordinate: guardedRead(() => guide.coordinate, guard),
+        minExtent: guardedRead(() => guide.minExtent, guard),
+        maxExtent: guardedRead(() => guide.maxExtent, guard),
+      }),
+    );
+  }
+  return Object.freeze(detached);
+}
+
+function snapshotMoveProposal(
+  proposal: MoveInteractionProposal,
+  guard?: SnapshotGuard,
+): MoveInteractionProposal {
+  return Object.freeze({
+    token: snapshotToken(
+      guardedRead(() => proposal.token, guard),
+      guard,
+    ),
+    selection: snapshotSelection(
+      guardedRead(() => proposal.selection, guard),
+      guard,
+    ),
+    rawDelta: snapshotPageDelta(guardedRead(() => proposal.rawDelta, guard)),
+    delta: snapshotPageDelta(guardedRead(() => proposal.delta, guard)),
+    guides: snapshotGuides(
+      guardedRead(() => proposal.guides, guard),
+      guard,
+    ),
+  });
+}
+
 function snapshotSample(sample: SelectionPointerSample): SelectionPointerSample {
   const pointerId = sample.pointerId;
   const shiftKey = sample.shiftKey;
@@ -285,8 +335,20 @@ function freezeCommitSelection(proposal: SelectionProposal): SelectionGestureEff
   return Object.freeze({ kind: 'commit-selection', proposal });
 }
 
-function freezeCommitMove(proposal: SelectionProposal, delta: PageDelta): SelectionGestureEffect {
-  return Object.freeze({ kind: 'commit-move', proposal, delta });
+function freezeCommitMove(
+  proposal: SelectionProposal,
+  delta: PageDelta,
+  alignment?: MoveInteractionProposal,
+): SelectionGestureEffect {
+  return alignment === undefined
+    ? Object.freeze({ kind: 'commit-move', proposal, delta })
+    : Object.freeze({
+        kind: 'commit-move',
+        proposal,
+        delta,
+        alignment,
+        guides: alignment.guides,
+      });
 }
 
 /**
@@ -298,6 +360,7 @@ export class MarqueeSelectionSession {
   private stateVersion = 0;
   private currentProposal: SelectionProposal;
   private moveProposal: SelectionProposal | null = null;
+  private latestMoveAlignment: MoveInteractionProposal | undefined;
   private latestVisual: SelectionGestureVisual | null = null;
   private currentSample: SelectionPointerSample;
   private terminalEffect: SelectionGestureTerminalEffect | null = null;
@@ -386,18 +449,19 @@ export class MarqueeSelectionSession {
   ): SelectionGestureEffect {
     if (this.phase === 'terminal') return IGNORE_EFFECT;
     const version = this.stateVersion;
-    const captured = this.captureOwnerSample(sample, version);
-    if (captured === null) return IGNORE_EFFECT;
-    this.currentSample = captured;
-    const outcome = this.advance(captured, provider, version);
-    if (outcome.kind === 'interrupted') return IGNORE_EFFECT;
-    if (outcome.kind === 'effect' && outcome.effect.kind === 'discard') {
-      return outcome.effect;
-    }
     if (this.phase !== 'moving') {
+      const captured = this.captureOwnerSample(sample, version);
+      if (captured === null) return IGNORE_EFFECT;
+      this.currentSample = captured;
+      const outcome = this.advance(captured, provider, version);
+      if (outcome.kind === 'interrupted') return IGNORE_EFFECT;
+      if (outcome.kind === 'effect' && outcome.effect.kind === 'discard') {
+        return outcome.effect;
+      }
       this.markTerminal('commit-selection');
       return freezeCommitSelection(this.currentProposal);
     }
+    if (!this.ownsPointer(sample, version)) return IGNORE_EFFECT;
     const delta = this.latestVisual?.movementDelta;
     if (delta === null || delta === undefined) {
       return this.discard(
@@ -411,7 +475,7 @@ export class MarqueeSelectionSession {
       return freezeCommitSelection(this.currentProposal);
     }
     this.markTerminal('commit-move');
-    return freezeCommitMove(this.currentProposal, delta);
+    return freezeCommitMove(this.currentProposal, delta, this.latestMoveAlignment);
   }
 
   /** End the owner session without writing captured state back into Core. */
@@ -471,6 +535,20 @@ export class MarqueeSelectionSession {
     }
   }
 
+  private ownsPointer(sample: SelectionPointerSample, version: number): boolean {
+    try {
+      return (
+        guardedRead(
+          () => sample.pointerId,
+          () => this.isCurrent(version),
+        ) === this.ownerPointerId
+      );
+    } catch (error) {
+      if (error === INTERRUPTED) return false;
+      throw error;
+    }
+  }
+
   private advance(
     sample: SelectionPointerSample,
     provider: SelectionProposalProvider,
@@ -513,6 +591,7 @@ export class MarqueeSelectionSession {
     });
     this.phase = 'marquee';
     this.currentProposal = proposal;
+    this.latestMoveAlignment = undefined;
     this.latestVisual = visual;
     this.stateVersion += 1;
     return { kind: 'effect', effect: freezePreview(visual) };
@@ -542,17 +621,54 @@ export class MarqueeSelectionSession {
     const delta = pageDeltaBetween(this.startPagePoint, currentPagePoint);
     if (!delta.ok) return { kind: 'effect', effect: this.discard(delta.error) };
     const detachedDelta = snapshotPageDelta(delta.value);
+    let move: MoveInteractionProposal | undefined;
+    if (provider.move !== undefined) {
+      const aligned = this.callMoveProvider(provider, proposal, detachedDelta, version);
+      if (aligned.kind === 'interrupted') return aligned;
+      if (!aligned.result.ok) {
+        return { kind: 'effect', effect: this.discard(aligned.result.error) };
+      }
+      move = aligned.result.value;
+    }
     const visual = Object.freeze({
       selection: proposal.selection,
       marquee: null,
-      movementDelta: detachedDelta,
+      movementDelta: move?.delta ?? detachedDelta,
+      ...(move === undefined || move.guides.length === 0 ? {} : { guides: move.guides }),
     });
     this.phase = 'moving';
     this.moveProposal = proposal;
     this.currentProposal = proposal;
+    this.latestMoveAlignment = move;
     this.latestVisual = visual;
     this.stateVersion += 1;
     return { kind: 'effect', effect: freezePreview(visual) };
+  }
+
+  private callMoveProvider(
+    provider: SelectionProposalProvider,
+    proposal: SelectionProposal,
+    delta: PageDelta,
+    version: number,
+  ): ProviderOutcome<MoveInteractionProposal> {
+    const current = () => this.isCurrent(version);
+    try {
+      const callMove = guardedRead(() => provider.move, current);
+      if (callMove === undefined) return { kind: 'interrupted' };
+      const raw = callMove.call(provider, this.interactionStart, proposal, delta);
+      if (!current()) return { kind: 'interrupted' };
+      if (!raw.ok)
+        return { kind: 'result', result: frozenFailure(snapshotError(raw.error, current)) };
+      return { kind: 'result', result: frozenSuccess(snapshotMoveProposal(raw.value, current)) };
+    } catch (error) {
+      if (error === INTERRUPTED || !current()) return { kind: 'interrupted' };
+      return {
+        kind: 'result',
+        result: frozenFailure(
+          Object.freeze({ code: 'interaction.provider-threw', path: '/provider/move' }),
+        ),
+      };
+    }
   }
 
   private callPointProvider(

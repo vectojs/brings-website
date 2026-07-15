@@ -733,6 +733,78 @@ test('rejects an old move when a delta getter commits a newer selection', () => 
   expect({ deltaXReads, deltaYReads }).toEqual({ deltaXReads: 1, deltaYReads: 1 });
 });
 
+test('recomputes a snapped move from its raw delta before committing the exact displayed result', () => {
+  const controller = populatedController();
+  const start = controller.beginSelectionInteraction();
+  const proposal = unwrap(
+    controller.proposePointSelection({ start, point: pagePoint(20, 20), mode: 'replace' }),
+  ).proposal;
+  const rawDelta = unwrap(pageDeltaBetween(pagePoint(0, 0), pagePoint(34, 0)));
+  const aligned = unwrap(controller.proposeMove({ start, proposal, delta: rawDelta }));
+
+  expect(aligned).toMatchObject({
+    rawDelta: { x: 34, y: 0 },
+    delta: { x: 40, y: 0 },
+    guides: [
+      {
+        axis: 'x',
+        sourceAnchor: 'max',
+        targetAnchor: 'min',
+        targetNodeId: interactionIds.second,
+      },
+      {
+        axis: 'y',
+        sourceAnchor: 'min',
+        targetAnchor: 'min',
+        targetNodeId: interactionIds.second,
+      },
+    ],
+  });
+  expect(Object.isFrozen(aligned)).toBe(true);
+  expect(Object.isFrozen(aligned.guides)).toBe(true);
+  expect(Object.isFrozen(aligned.guides[0])).toBe(true);
+
+  const forged = {
+    ...aligned,
+    delta: Object.freeze({ x: 34, y: 0 }) as PageDelta,
+  };
+  expect(controller.commitMove({ proposal, delta: forged.delta, alignment: forged })).toEqual({
+    ok: false,
+    error: { code: 'interaction.move-mismatch', path: '/move' },
+  });
+  const committed = controller.commitMove({ proposal, delta: aligned.delta, alignment: aligned });
+  expect(committed.ok).toBe(true);
+  if (!committed.ok) throw new Error('expected the verified snapped move to commit');
+  expect(
+    committed.value.document.nodes.find((node) => node.id === interactionIds.first)?.transform,
+  ).toEqual([1, 0, 0, 1, 50, 10]);
+});
+
+test('keeps at most one prepared alignment and clears it on terminal or stale paths', () => {
+  const controller = populatedController();
+  unwrap(controller.selectAt(20, 20));
+
+  const first = controller.beginSelectionInteraction();
+  expect(controller.debugPreparedAlignmentCount()).toBe(1);
+  for (let index = 0; index < 20; index += 1) controller.beginSelectionInteraction();
+  expect(controller.debugPreparedAlignmentCount()).toBe(1);
+
+  const selected = unwrap(
+    controller.proposePointSelection({ start: first, point: pagePoint(20, 20), mode: 'replace' }),
+  ).proposal;
+  unwrap(controller.commitSelection(selected));
+  expect(controller.debugPreparedAlignmentCount()).toBe(0);
+
+  const stale = controller.beginSelectionInteraction();
+  expect(controller.debugPreparedAlignmentCount()).toBe(1);
+  unwrap(controller.moveSelectionBy(1, 0));
+  expect(controller.debugPreparedAlignmentCount()).toBe(0);
+  expect(
+    controller.proposePointSelection({ start: stale, point: pagePoint(110, 20), mode: 'replace' }),
+  ).toEqual({ ok: false, error: { code: 'interaction.stale', path: '/interaction' } });
+  expect(controller.debugPreparedAlignmentCount()).toBe(0);
+});
+
 test('Core-normalizes a caller-owned parent and child proposal before commit', () => {
   const ids = [
     '11111111-1111-4111-8111-111111111111',

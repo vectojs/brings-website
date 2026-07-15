@@ -2,11 +2,13 @@ import {
   createDocumentStore,
   hitTestPage,
   intersectPageRect,
+  prepareSelectionAlignment,
   prepareSelectionResize,
   resolveStructuralSelection,
   type BringsError,
   type BringsDocument,
   type BringsDocumentStore,
+  type AlignmentGuide,
   type CreateDocumentInput,
   type EditorSnapshot,
   type NodeId,
@@ -30,6 +32,7 @@ import type {
   PointSelectionMode,
   ResizeInteractionProposal,
   ResizeInteractionStart,
+  MoveInteractionProposal,
   SelectionInteractionStart,
   SelectionInteractionToken,
   SelectionProposal,
@@ -52,6 +55,9 @@ type PreparedCommitProposal = Readonly<{
   selection: StructuralSelection;
   nodeIds: readonly NodeId[];
 }>;
+
+type PreparedAlignment =
+  ReturnType<typeof prepareSelectionAlignment> extends Result<infer T> ? T : never;
 
 function cloneSelection(selection: StructuralSelection): StructuralSelection {
   return {
@@ -122,6 +128,42 @@ function freezeResizeProposal(resize: SelectionResizeProposal): SelectionResizeP
   });
 }
 
+function freezeGuides(guides: readonly AlignmentGuide[]): readonly AlignmentGuide[] {
+  return Object.freeze(
+    guides.map((guide) =>
+      Object.freeze({
+        axis: guide.axis,
+        sourceAnchor: guide.sourceAnchor,
+        targetAnchor: guide.targetAnchor,
+        targetNodeId: guide.targetNodeId,
+        coordinate: guide.coordinate,
+        minExtent: guide.minExtent,
+        maxExtent: guide.maxExtent,
+      }),
+    ),
+  );
+}
+
+function freezePageDelta(delta: PageDelta): PageDelta {
+  return Object.freeze({ x: delta.x, y: delta.y }) as PageDelta;
+}
+
+function sameGuides(left: readonly AlignmentGuide[], right: readonly AlignmentGuide[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (guide, index) =>
+        guide.axis === right[index]?.axis &&
+        guide.sourceAnchor === right[index]?.sourceAnchor &&
+        guide.targetAnchor === right[index]?.targetAnchor &&
+        guide.targetNodeId === right[index]?.targetNodeId &&
+        guide.coordinate === right[index]?.coordinate &&
+        guide.minExtent === right[index]?.minExtent &&
+        guide.maxExtent === right[index]?.maxExtent,
+    )
+  );
+}
+
 function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -153,6 +195,7 @@ export class BringsEditorController {
   private readonly createUuid: UuidFactory;
   private activeFrameId: string | null = null;
   private selectionGeneration = 0;
+  private alignment: Readonly<{ key: string; value: PreparedAlignment }> | null = null;
 
   public constructor(createUuid: UuidFactory, options: ControllerOptions = {}) {
     this.createUuid = createUuid;
@@ -189,33 +232,74 @@ export class BringsEditorController {
     };
   }
 
+  /** Report bounded prepared-alignment ownership without exposing its captured document. */
+  public debugPreparedAlignmentCount(): 0 | 1 {
+    return this.alignment === null ? 0 : 1;
+  }
+
   /** Capture the durable and ephemeral versions used by one pure interaction. */
   public beginSelectionInteraction(): SelectionInteractionStart {
     const snapshot = this.store.snapshot();
-    return {
+    const start = {
       token: {
         documentRevision: snapshot.document.revision,
         selectionGeneration: this.selectionGeneration,
       },
       selection: cloneSelection(snapshot.selection),
     };
+    this.captureAlignment(snapshot.document, start.selection, start.token);
+    return start;
   }
 
   /** Capture immutable Core resize geometry for the current normalized selection. */
   public beginResizeInteraction(): Result<ResizeInteractionStart> {
+    this.clearAlignment();
     const snapshot = this.store.snapshot();
     const prepared = prepareSelectionResize(snapshot.document, snapshot.selection);
     if (!prepared.ok) return prepared;
+    const start = Object.freeze({
+      token: Object.freeze({
+        documentRevision: snapshot.document.revision,
+        selectionGeneration: this.selectionGeneration,
+      }),
+      selection: freezeSelection(prepared.value.selection),
+      bounds: freezeResizeBounds(prepared.value.bounds),
+      handles: freezeResizeHandles(prepared.value.handles),
+    });
+    this.captureAlignment(snapshot.document, start.selection, start.token);
+    return { ok: true, value: start };
+  }
+
+  /** Ask Core for one immutable snapped move proposal without changing history. */
+  public proposeMove(
+    input: Readonly<{
+      start: SelectionInteractionStart;
+      proposal: SelectionProposal;
+      delta: PageDelta;
+    }>,
+  ): Result<MoveInteractionProposal> {
+    if (!this.sameToken(input.start.token, input.proposal.token)) {
+      return this.failure('interaction.stale', '/interaction');
+    }
+    const prepared = this.prepareCommitProposal(input.proposal);
+    if (!prepared.ok) return prepared;
+    const alignment = this.alignmentFor(
+      prepared.value.before.document,
+      prepared.value.selection,
+      input.proposal.token,
+    );
+    if (!alignment.ok) return alignment;
+    const rawDelta = freezePageDelta(input.delta);
+    const resolved = alignment.value.resolveMove(rawDelta);
+    if (!resolved.ok) return resolved;
     return {
       ok: true,
       value: Object.freeze({
-        token: Object.freeze({
-          documentRevision: snapshot.document.revision,
-          selectionGeneration: this.selectionGeneration,
-        }),
+        token: Object.freeze({ ...input.proposal.token }),
         selection: freezeSelection(prepared.value.selection),
-        bounds: freezeResizeBounds(prepared.value.bounds),
-        handles: freezeResizeHandles(prepared.value.handles),
+        rawDelta,
+        delta: freezePageDelta(resolved.value.delta as PageDelta),
+        guides: freezeGuides(resolved.value.guides),
       }),
     };
   }
@@ -235,39 +319,57 @@ export class BringsEditorController {
     if (!sameSelection(snapshot.selection, capturedStart.selection)) {
       return this.failure('interaction.selection-mismatch', '/selection');
     }
-    const prepared = prepareSelectionResize(snapshot.document, capturedStart.selection);
-    if (!prepared.ok) return prepared;
-    const proposed = prepared.value.propose(capturedInput);
+    const alignment = this.alignmentFor(
+      snapshot.document,
+      capturedStart.selection,
+      capturedStart.token,
+    );
+    if (!alignment.ok) return alignment;
+    const proposed = alignment.value.resolveResize(capturedInput);
     if (!proposed.ok) return proposed;
+    const adjustedInput = freezeResizeInput({
+      ...capturedInput,
+      currentPoint: proposed.value.currentPoint,
+    });
     return {
       ok: true,
       value: Object.freeze({
         token: capturedStart.token,
-        selection: freezeSelection(prepared.value.selection),
-        input: capturedInput,
-        resize: freezeResizeProposal(proposed.value),
+        selection: freezeSelection(alignment.value.selection),
+        input: adjustedInput,
+        resize: freezeResizeProposal(proposed.value.resize),
+        guides: freezeGuides(proposed.value.guides),
       }),
     };
   }
 
   /** Validate and execute the exact final Core resize command as one history entry. */
   public commitResize(proposal: ResizeInteractionProposal): Result<EditorSnapshot> {
-    const captured = this.captureResizeProposal(proposal);
-    const valid = this.validateToken(captured.token);
-    if (!valid.ok) return valid;
-    const before = this.store.snapshot();
-    if (!sameSelection(before.selection, captured.selection)) {
-      return this.failure('interaction.selection-mismatch', '/selection');
+    try {
+      const captured = this.captureResizeProposal(proposal);
+      const valid = this.validateToken(captured.token);
+      if (!valid.ok) return valid;
+      const before = this.store.snapshot();
+      if (!sameSelection(before.selection, captured.selection)) {
+        return this.failure('interaction.selection-mismatch', '/selection');
+      }
+      const alignment = this.alignmentFor(before.document, captured.selection, captured.token);
+      if (!alignment.ok) return alignment;
+      const expected = alignment.value.resolveResize(captured.input);
+      if (!expected.ok) return expected;
+      if (
+        !sameResize(expected.value.resize, captured.resize) ||
+        !sameGuides(expected.value.guides, captured.guides) ||
+        expected.value.currentPoint.x !== captured.input.currentPoint.x ||
+        expected.value.currentPoint.y !== captured.input.currentPoint.y
+      ) {
+        return this.failure('interaction.resize-mismatch', '/resize');
+      }
+      const result = this.store.execute(captured.resize.command);
+      return this.finishOperation(before.selection, result);
+    } finally {
+      this.clearAlignment();
     }
-    const prepared = prepareSelectionResize(before.document, captured.selection);
-    if (!prepared.ok) return prepared;
-    const expected = prepared.value.propose(captured.input);
-    if (!expected.ok) return expected;
-    if (!sameResize(expected.value, captured.resize)) {
-      return this.failure('interaction.resize-mismatch', '/resize');
-    }
-    const result = this.store.execute(captured.resize.command);
-    return this.finishOperation(before.selection, result);
   }
 
   /** Propose a normalized point selection without mutating the Core store. */
@@ -348,12 +450,16 @@ export class BringsEditorController {
 
   /** Commit one normalized ephemeral selection if its interaction token is current. */
   public commitSelection(proposal: SelectionProposal): Result<EditorSnapshot> {
-    const prepared = this.prepareCommitProposal(proposal);
-    if (!prepared.ok) return prepared;
-    return this.finishOperation(
-      prepared.value.before.selection,
-      this.store.setSelection(prepared.value.selection),
-    );
+    try {
+      const prepared = this.prepareCommitProposal(proposal);
+      if (!prepared.ok) return prepared;
+      return this.finishOperation(
+        prepared.value.before.selection,
+        this.store.setSelection(prepared.value.selection),
+      );
+    } finally {
+      this.clearAlignment();
+    }
   }
 
   /** Atomically commit a proposed selection and one page-space translation. */
@@ -361,6 +467,21 @@ export class BringsEditorController {
     input: Readonly<{
       proposal: SelectionProposal;
       delta: PageDelta;
+      alignment?: MoveInteractionProposal;
+    }>,
+  ): Result<EditorSnapshot> {
+    try {
+      return this.commitMoveOwned(input);
+    } finally {
+      this.clearAlignment();
+    }
+  }
+
+  private commitMoveOwned(
+    input: Readonly<{
+      proposal: SelectionProposal;
+      delta: PageDelta;
+      alignment?: MoveInteractionProposal;
     }>,
   ): Result<EditorSnapshot> {
     const delta = input.delta;
@@ -370,6 +491,32 @@ export class BringsEditorController {
     if (!prepared.ok) return prepared;
     if (prepared.value.nodeIds.length === 0) {
       return this.failure('selection.empty', '/nodeIds');
+    }
+    if (input.alignment !== undefined) {
+      const captured = this.captureMoveProposal(input.alignment);
+      if (
+        !this.sameToken(captured.token, input.proposal.token) ||
+        !sameSelection(captured.selection, prepared.value.selection)
+      ) {
+        return this.failure('interaction.move-mismatch', '/move');
+      }
+      const alignment = this.alignmentFor(
+        prepared.value.before.document,
+        prepared.value.selection,
+        captured.token,
+      );
+      if (!alignment.ok) return alignment;
+      const expected = alignment.value.resolveMove(captured.rawDelta);
+      if (
+        !expected.ok ||
+        expected.value.delta.x !== captured.delta.x ||
+        expected.value.delta.y !== captured.delta.y ||
+        !sameGuides(expected.value.guides, captured.guides) ||
+        captured.delta.x !== deltaX ||
+        captured.delta.y !== deltaY
+      ) {
+        return this.failure('interaction.move-mismatch', '/move');
+      }
     }
     const originalSelection = prepared.value.before.selection;
     const selected = this.store.setSelection(prepared.value.selection);
@@ -550,7 +697,57 @@ export class BringsEditorController {
       selection: freezeSelection(proposal.selection),
       input: freezeResizeInput(proposal.input),
       resize: freezeResizeProposal(proposal.resize),
+      guides: freezeGuides(proposal.guides),
     });
+  }
+
+  private captureMoveProposal(proposal: MoveInteractionProposal): MoveInteractionProposal {
+    return Object.freeze({
+      token: Object.freeze({ ...proposal.token }),
+      selection: freezeSelection(proposal.selection),
+      rawDelta: freezePageDelta(proposal.rawDelta),
+      delta: freezePageDelta(proposal.delta),
+      guides: freezeGuides(proposal.guides),
+    });
+  }
+
+  private alignmentKey(token: SelectionInteractionToken, selection: StructuralSelection): string {
+    return `${token.documentRevision}:${token.selectionGeneration}:${selection.activeNodeId ?? ''}:${selection.nodeIds.join(',')}`;
+  }
+
+  private captureAlignment(
+    document: BringsDocument,
+    selection: StructuralSelection,
+    token: SelectionInteractionToken,
+  ): void {
+    this.alignment = null;
+    if (selection.nodeIds.length === 0) return;
+    const key = this.alignmentKey(token, selection);
+    const prepared = prepareSelectionAlignment(document, selection);
+    if (prepared.ok) this.alignment = Object.freeze({ key, value: prepared.value });
+  }
+
+  private alignmentFor(
+    document: BringsDocument,
+    selection: StructuralSelection,
+    token: SelectionInteractionToken,
+  ): Result<PreparedAlignment> {
+    const key = this.alignmentKey(token, selection);
+    if (this.alignment?.key === key) return { ok: true, value: this.alignment.value };
+    const prepared = prepareSelectionAlignment(document, selection);
+    this.alignment = prepared.ok ? Object.freeze({ key, value: prepared.value }) : null;
+    return prepared;
+  }
+
+  private clearAlignment(): void {
+    this.alignment = null;
+  }
+
+  private sameToken(left: SelectionInteractionToken, right: SelectionInteractionToken): boolean {
+    return (
+      left.documentRevision === right.documentRevision &&
+      left.selectionGeneration === right.selectionGeneration
+    );
   }
 
   private validateToken(token: SelectionInteractionToken): Result<void> {
@@ -629,6 +826,7 @@ export class BringsEditorController {
     before: StructuralSelection,
     result: Result<EditorSnapshot>,
   ): Result<EditorSnapshot> {
+    this.clearAlignment();
     if (result.ok && !sameSelection(before, result.value.selection)) {
       this.selectionGeneration += 1;
     }
@@ -651,6 +849,9 @@ export class BringsEditorController {
   }
 
   private failure(code: string, path: string): Result<never> {
+    if (code === 'interaction.stale' || code === 'interaction.selection-mismatch') {
+      this.clearAlignment();
+    }
     const error: BringsError = { code, path };
     return { ok: false, error };
   }
