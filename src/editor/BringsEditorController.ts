@@ -309,6 +309,21 @@ export class BringsEditorController {
     return this.setSelectionProperties({ locked });
   }
 
+  /** Toggle one Layers-row visibility without changing the active selection first. */
+  public toggleLayerVisibility(nodeId: string): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    const node = snapshot.document.nodes.find((candidate) => candidate.id === nodeId);
+    if (node === undefined) return this.failure('node.not-found', '/nodeIds');
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.execute({
+        kind: 'set-node-properties',
+        nodeIds: [node.id],
+        patch: { visible: !node.visible },
+      }),
+    );
+  }
+
   /** Wrap selected sibling roots in a named Core Group. */
   public groupSelection(name = 'Group'): Result<EditorSnapshot> {
     const snapshot = this.store.snapshot();

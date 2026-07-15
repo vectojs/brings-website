@@ -341,6 +341,15 @@ test('derives layers and executes Core-backed property and grouping commands', (
     nodeIds: [interactionIds.first],
     activeNodeId: interactionIds.first,
   });
+  expect(controller.toggleLayerVisibility(interactionIds.second).ok).toBe(true);
+  expect(controller.snapshot()).toMatchObject({
+    selection: { nodeIds: [interactionIds.first], activeNodeId: interactionIds.first },
+  });
+  expect(controller.snapshot().document.nodes[1]).toMatchObject({
+    id: interactionIds.second,
+    visible: false,
+  });
+  expect(controller.toggleLayerVisibility(interactionIds.second).ok).toBe(true);
 
   expect(
     controller.setLayerSelection(

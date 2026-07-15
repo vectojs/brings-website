@@ -10,6 +10,7 @@ import type {
   BringsError,
   EditorSnapshot,
   Matrix,
+  NodeId,
   ResizeBounds,
   ResizeHandle,
   ResizePoint,
@@ -17,6 +18,7 @@ import type {
   SceneNode,
   SelectionResizeProposal,
 } from '@vectojs/brings-core';
+import type { BringsLayerItem } from '../editor/BringsEditorController';
 import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
 import type {
   ResizeInteractionProposal,
@@ -337,6 +339,13 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
 
 export interface EditorShellPorts {
   readonly documentSnapshot?: () => EditorSnapshot;
+  /** Select a layer without introducing an undoable document change. */
+  readonly selectLayer?: (
+    nodeIds: readonly string[],
+    activeNodeId: string | null,
+  ) => Result<EditorSnapshot>;
+  /** Toggle visibility for one row without selecting it first. */
+  readonly setLayerVisibility?: (nodeId: string) => Result<EditorSnapshot>;
   readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
@@ -365,6 +374,8 @@ export interface EditorShellPorts {
 
 type ResolvedEditorShellPorts = Readonly<{
   documentSnapshot: () => EditorSnapshot;
+  selectLayer: (nodeIds: readonly string[], activeNodeId: string | null) => Result<EditorSnapshot>;
+  setLayerVisibility: (nodeId: string) => Result<EditorSnapshot>;
   createAt: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
@@ -415,6 +426,8 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   ResolvedEditorShellPorts,
   'documentSnapshot' | 'beginSelectionInteraction'
 > = {
+  selectLayer: () => unavailable('layer.selection-unavailable'),
+  setLayerVisibility: () => unavailable('layer.visibility-unavailable'),
   createAt: () => unavailable('shape.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
@@ -445,6 +458,8 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
   const documentSnapshot = ports.documentSnapshot ?? DEFAULT_DOCUMENT_SNAPSHOT;
   return {
     documentSnapshot,
+    selectLayer: ports.selectLayer ?? DEFAULT_EDITOR_SHELL_PORTS.selectLayer,
+    setLayerVisibility: ports.setLayerVisibility ?? DEFAULT_EDITOR_SHELL_PORTS.setLayerVisibility,
     createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
     beginSelectionInteraction:
       ports.beginSelectionInteraction ??
@@ -585,6 +600,89 @@ class CanvasLabel extends Entity {
   }
 }
 
+/** A compact Figma-style row; all changes remain routed through the controller ports. */
+class LayerRow extends Entity {
+  private item: BringsLayerItem | null = null;
+
+  public constructor(
+    id: string,
+    private readonly onSelect: (nodeId: NodeId) => Result<EditorSnapshot>,
+    private readonly onToggleVisibility: (nodeId: NodeId) => Result<EditorSnapshot>,
+    private readonly markDirty: () => void,
+  ) {
+    super(id);
+    this.interactive = true;
+    this.on('pointerdown', (event) => this.routePointerDown(event));
+  }
+
+  public setLayer(item: BringsLayerItem, x: number, y: number, width: number): void {
+    this.item = item;
+    this.x = x;
+    this.y = y;
+    this.width = Math.max(0, width);
+    this.height = 26;
+  }
+
+  public override getA11yAttributes(): A11yAttributes {
+    const item = this.item;
+    if (item === null) return { role: 'button', label: 'Layer' };
+    return {
+      role: 'button',
+      label: `${item.name} layer${item.selected ? ' selected' : ''}`,
+    };
+  }
+
+  public override getContentProjection(): ContentProjection | null {
+    const item = this.item;
+    return item === null ? null : { text: item.name, font: '500 12px system-ui, sans-serif' };
+  }
+
+  public override isPointInside(globalX: number, globalY: number): boolean {
+    const local = this.worldToLocal(globalX, globalY);
+    return (
+      local !== null &&
+      local.x >= 0 &&
+      local.x <= this.width &&
+      local.y >= 0 &&
+      local.y <= this.height
+    );
+  }
+
+  public override render(renderer: IRenderer): void {
+    const item = this.item;
+    if (item === null) return;
+    if (item.selected) {
+      renderer.beginPath();
+      renderer.roundRect(0, 1, this.width, this.height - 2, 4);
+      renderer.fill('#385a98');
+    }
+    const glyph = item.type === 'frame' ? '□' : item.type === 'group' ? '◇' : '◆';
+    renderer.fillText(glyph, 6, 17, '600 11px system-ui, sans-serif', '#aebed6');
+    renderer.fillText(item.name, 24, 17, '500 12px system-ui, sans-serif', '#f3f6fb');
+    if (item.locked)
+      renderer.fillText('▣', this.width - 38, 17, '500 11px system-ui, sans-serif', '#cbd5e1');
+    renderer.fillText(
+      item.visible ? '◉' : '○',
+      this.width - 18,
+      17,
+      '500 11px system-ui, sans-serif',
+      '#cbd5e1',
+    );
+  }
+
+  private routePointerDown(event: VectoJSEvent): void {
+    const item = this.item;
+    if (item === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const result =
+      (event.localX ?? 0) >= this.width - 26
+        ? this.onToggleVisibility(item.id)
+        : this.onSelect(item.id);
+    if (result.ok) this.markDirty();
+  }
+}
+
 /**
  * The first canvas-native Brings surface. It owns explicit numeric panel bounds;
  * later tools reconcile document entities below the `canvasRegion` seam.
@@ -653,6 +751,8 @@ export class EditorShell extends Entity {
   private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
     this.activateTool('rectangle');
   });
+  private readonly layerRows = new Map<NodeId, LayerRow>();
+  private layerSignature = '';
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
   private selectionSession: MarqueeSelectionSession | null = null;
@@ -705,9 +805,12 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
     this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
+    // A panel must participate in hit testing so its interactive row descendants can own events.
+    this.layers.setPointerHandler(() => undefined);
     this.layout = resolveEditorLayout(width, height);
     this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
     this.resize(width, height);
+    this.syncLayerRows();
   }
 
   /** True while the narrow-screen shell supports editing tools. */
@@ -797,6 +900,7 @@ export class EditorShell extends Entity {
   }
 
   public override render(renderer: IRenderer): void {
+    this.syncLayerRows();
     const { toolbarHeight, viewport } = this.layout;
     const toolbarHeightInScene = Math.min(toolbarHeight, this.height);
 
@@ -854,6 +958,82 @@ export class EditorShell extends Entity {
 
     if (!leftOpen) this.layers.setFrame(0, 0, 0, 0, false);
     if (!rightOpen) this.properties.setFrame(0, 0, 0, 0, false);
+    this.layoutLayerRows();
+  }
+
+  private syncLayerRows(): void {
+    const items = this.deriveLayerItems(this.ports.documentSnapshot());
+    const signature = items
+      .map(
+        (item) =>
+          `${item.id}:${item.name}:${item.visible}:${item.locked}:${item.selected}:${item.depth}`,
+      )
+      .join('|');
+    if (signature === this.layerSignature) return;
+    this.layerSignature = signature;
+    const wanted = new Set(items.map((item) => item.id));
+    for (const [id, row] of this.layerRows) {
+      if (wanted.has(id)) continue;
+      this.layers.remove(row);
+      this.layerRows.delete(id);
+    }
+    for (const item of items) {
+      let row = this.layerRows.get(item.id);
+      if (row === undefined) {
+        row = new LayerRow(
+          `brings-layer-${item.id}`,
+          (nodeId) => this.ports.selectLayer([nodeId], nodeId),
+          (nodeId) => this.ports.setLayerVisibility(nodeId),
+          () => this.scene?.markDirty(),
+        );
+        this.layerRows.set(item.id, row);
+        this.layers.add(row);
+      }
+    }
+    this.layoutLayerRows(items);
+  }
+
+  private layoutLayerRows(items = this.deriveLayerItems(this.ports.documentSnapshot())): void {
+    for (const [index, item] of items.entries()) {
+      const row = this.layerRows.get(item.id);
+      if (row === undefined) continue;
+      row.setLayer(
+        item,
+        12 + item.depth * 16,
+        88 + index * 28,
+        this.layers.width - 24 - item.depth * 16,
+      );
+    }
+  }
+
+  private deriveLayerItems(snapshot: EditorSnapshot): readonly BringsLayerItem[] {
+    const page = snapshot.document.pages.find(
+      (candidate) => candidate.id === snapshot.document.activePageId,
+    );
+    if (page === undefined) return [];
+    const nodes = new Map(snapshot.document.nodes.map((node) => [node.id, node]));
+    const selected = new Set(snapshot.selection.nodeIds);
+    const layers: BringsLayerItem[] = [];
+    const visit = (nodeId: NodeId, depth: number): void => {
+      const node = nodes.get(nodeId);
+      if (node === undefined) return;
+      const hasChildren = node.type === 'frame' || node.type === 'group';
+      layers.push({
+        id: node.id,
+        parentId: node.parentId,
+        type: node.type,
+        name: node.name,
+        depth,
+        visible: node.visible,
+        locked: node.locked,
+        selected: selected.has(node.id),
+        hasChildren,
+      });
+      if (!hasChildren) return;
+      for (const childId of node.childIds) visit(childId, depth + 1);
+    };
+    for (const rootId of page.rootNodeIds) visit(rootId, 0);
+    return layers;
   }
 
   private renderPanel(renderer: IRenderer, panel: EditorRegion): void {

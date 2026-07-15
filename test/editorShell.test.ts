@@ -361,6 +361,50 @@ test('projects the named Brings application and primary editor regions', () => {
   ]);
 });
 
+test('renders ordered interactive layer rows from the Core snapshot', () => {
+  const selected = editorSnapshot([second]);
+  const selections: Array<readonly string[]> = [];
+  const visibility: string[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => selected,
+    selectLayer: (nodeIds, activeNodeId) => {
+      selections.push([...nodeIds, activeNodeId ?? '']);
+      return { ok: true, value: selected };
+    },
+    setLayerVisibility: (nodeId) => {
+      visibility.push(nodeId);
+      return { ok: true, value: selected };
+    },
+  });
+  shell.render(recordingRenderer().renderer);
+
+  const frame = childById(shell, `brings-layer-${first}`);
+  const rectangle = childById(shell, `brings-layer-${second}`);
+  expect(frame.getA11yAttributes()).toEqual({ role: 'button', label: 'Frame layer' });
+  expect(rectangle.getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Rectangle layer selected',
+  });
+  expect(rectangle.x).toBeGreaterThan(frame.x);
+  expect(rectangle.y).toBeGreaterThan(frame.y);
+
+  rectangle.dispatchEvent(
+    new VectoJSEvent('pointerdown', rectangle, { button: 0 }, true, {
+      x: rectangle.x + 20,
+      y: rectangle.y + 12,
+    }),
+  );
+  expect(selections).toEqual([[second, second]]);
+
+  rectangle.dispatchEvent(
+    new VectoJSEvent('pointerdown', rectangle, { button: 0 }, true, {
+      x: rectangle.x + rectangle.width - 12,
+      y: rectangle.y + 12,
+    }),
+  );
+  expect(visibility).toEqual([second]);
+});
+
 test('keeps closed drawers out of hit testing and accessibility projection', () => {
   const shell = new EditorShell(1024, 768);
   const properties = childById(shell, 'brings-properties');
