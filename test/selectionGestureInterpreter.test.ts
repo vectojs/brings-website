@@ -14,8 +14,11 @@ import {
   viewportToPagePoint,
   type PageDelta,
 } from '../src/editor/selectionCoordinates';
-import type { SelectionProposal } from '../src/editor/selectionInteraction';
-import type { ResizeInteractionProposal } from '../src/editor/selectionInteraction';
+import type {
+  MoveInteractionProposal,
+  ResizeInteractionProposal,
+  SelectionProposal,
+} from '../src/editor/selectionInteraction';
 import type {
   SelectionGestureEffect,
   SelectionGestureVisual,
@@ -54,6 +57,26 @@ function visual(nodeIds: readonly NodeId[] = [first]): SelectionGestureVisual {
 
 function snapshot(): EditorSnapshot {
   return {} as EditorSnapshot;
+}
+
+function moveAlignment(): MoveInteractionProposal {
+  return {
+    token: { documentRevision: 3, selectionGeneration: 2 },
+    selection: selection([first]),
+    rawDelta: { x: 34, y: 0 } as PageDelta,
+    delta: { x: 40, y: 0 } as PageDelta,
+    guides: [
+      {
+        axis: 'x',
+        sourceAnchor: 'max',
+        targetAnchor: 'min',
+        targetNodeId: second,
+        coordinate: 100,
+        minExtent: 10,
+        maxExtent: 150,
+      },
+    ],
+  };
 }
 
 function fixture(
@@ -178,6 +201,91 @@ test('commits a move through one object input and reports discard errors once', 
 
   expect(state.interpreter.apply({ kind: 'ignore' })).toBe(false);
   expect(state.dirtyCalls()).toBe(4);
+});
+
+test('guarded-snapshots and deeply freezes move alignment before commit', () => {
+  let committed:
+    | Readonly<{
+        proposal: SelectionProposal;
+        delta: PageDelta;
+        alignment?: MoveInteractionProposal;
+      }>
+    | undefined;
+  const interpreter = new SelectionGestureInterpreter({
+    commitSelection: () => ({ ok: true, value: snapshot() }),
+    commitMove: (value) => {
+      committed = value;
+      return { ok: true, value: snapshot() };
+    },
+    reportInteractionError: () => undefined,
+    markDirty: () => undefined,
+  });
+  const source = moveAlignment();
+  const sourceDelta = { x: 40, y: 0 } as PageDelta;
+
+  expect(
+    interpreter.apply({
+      kind: 'commit-move',
+      proposal: proposal([first]),
+      delta: sourceDelta,
+      alignment: source,
+    }),
+  ).toBe(true);
+  (source.rawDelta as { x: number }).x = 999;
+  (source.delta as { x: number }).x = 999;
+  (source.guides as unknown as Array<{ coordinate: number }>)[0]!.coordinate = 999;
+  (source.selection.nodeIds as unknown as NodeId[]).push(second);
+  (sourceDelta as { x: number }).x = 999;
+
+  expect(committed).toMatchObject({
+    delta: { x: 40, y: 0 },
+    alignment: moveAlignment(),
+  });
+  expect(committed?.alignment).not.toBe(source);
+  expect(Object.isFrozen(committed)).toBe(true);
+  expect(Object.isFrozen(committed?.delta)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment?.token)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment?.selection.nodeIds)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment?.rawDelta)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment?.delta)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment?.guides)).toBe(true);
+  expect(Object.isFrozen(committed?.alignment?.guides[0])).toBe(true);
+});
+
+test('rejects a move commit whose alignment accessor installs a newer preview', () => {
+  let commits = 0;
+  let interpreter!: SelectionGestureInterpreter;
+  const newer = visual([second]);
+  interpreter = new SelectionGestureInterpreter({
+    commitSelection: () => ({ ok: true, value: snapshot() }),
+    commitMove: () => {
+      commits += 1;
+      return { ok: true, value: snapshot() };
+    },
+    reportInteractionError: () => undefined,
+    markDirty: () => undefined,
+  });
+  interpreter.apply({ kind: 'preview', visual: visual([first]) });
+  const effect = Object.defineProperties(
+    {
+      kind: 'commit-move' as const,
+      proposal: proposal([first]),
+      delta: { x: 40, y: 0 } as PageDelta,
+    },
+    {
+      alignment: {
+        get() {
+          interpreter.apply({ kind: 'preview', visual: newer });
+          return moveAlignment();
+        },
+      },
+    },
+  ) as Extract<SelectionGestureEffect, { kind: 'commit-move' }>;
+
+  expect(interpreter.apply(effect)).toBe(false);
+  expect(commits).toBe(0);
+  expect(interpreter.visual).toEqual(newer);
 });
 
 test('treats node order, active identity, and null versus zero delta as visual semantics', () => {

@@ -208,7 +208,7 @@ test('previews and commits the exact frozen Core resize alignment proposal once'
   expect(Object.isFrozen(preview.visual.guides)).toBe(true);
   expect(Object.isFrozen(preview.visual.guides?.[0])).toBe(true);
 
-  const commit = session.finish(sample(41, 160, 120), provider);
+  const commit = session.finish(sample(41, 240, 260, true, true), provider);
   expect(commit).toMatchObject({
     kind: 'commit-resize',
     proposal: { input: { currentPoint: { x: 160, y: 99 } }, guides },
@@ -312,7 +312,7 @@ test('Escape directly discards one active resize session and ignores every late 
   expect(session.finish(sample(12, 160, 120), fixture.provider)).toEqual({ kind: 'ignore' });
 });
 
-test('does not commit an identity proposal after returning a moved pointer to its origin', () => {
+test('commits the last displayed resize when pointerup returns to its origin', () => {
   const interaction = start();
   let calls = 0;
   const provider: ResizeProposalProvider = {
@@ -338,11 +338,11 @@ test('does not commit an identity proposal after returning a moved pointer to it
   const session = begin(interaction, sample(21, 113, 73), provider);
 
   expect(session.update(sample(21, 160, 120), provider)).toMatchObject({ kind: 'preview' });
-  expect(session.finish(sample(21, 113, 73), provider)).toEqual({
-    kind: 'discard',
-    reason: 'no-change',
+  expect(session.finish(sample(21, 113, 73), provider)).toMatchObject({
+    kind: 'commit-resize',
+    proposal: { input: { currentPoint: { x: 160, y: 120 } } },
   });
-  expect(calls).toBe(2);
+  expect(calls).toBe(1);
 });
 
 test('discards stale/provider failures and prevents outer updates from winning reentrantly', () => {

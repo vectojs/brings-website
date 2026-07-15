@@ -56,6 +56,9 @@ type PreparedCommitProposal = Readonly<{
   nodeIds: readonly NodeId[];
 }>;
 
+type PreparedAlignment =
+  ReturnType<typeof prepareSelectionAlignment> extends Result<infer T> ? T : never;
+
 function cloneSelection(selection: StructuralSelection): StructuralSelection {
   return {
     nodeIds: [...selection.nodeIds],
@@ -192,10 +195,7 @@ export class BringsEditorController {
   private readonly createUuid: UuidFactory;
   private activeFrameId: string | null = null;
   private selectionGeneration = 0;
-  private readonly alignments = new Map<
-    string,
-    ReturnType<typeof prepareSelectionAlignment> extends Result<infer T> ? T : never
-  >();
+  private alignment: Readonly<{ key: string; value: PreparedAlignment }> | null = null;
 
   public constructor(createUuid: UuidFactory, options: ControllerOptions = {}) {
     this.createUuid = createUuid;
@@ -232,6 +232,11 @@ export class BringsEditorController {
     };
   }
 
+  /** Report bounded prepared-alignment ownership without exposing its captured document. */
+  public debugPreparedAlignmentCount(): 0 | 1 {
+    return this.alignment === null ? 0 : 1;
+  }
+
   /** Capture the durable and ephemeral versions used by one pure interaction. */
   public beginSelectionInteraction(): SelectionInteractionStart {
     const snapshot = this.store.snapshot();
@@ -248,6 +253,7 @@ export class BringsEditorController {
 
   /** Capture immutable Core resize geometry for the current normalized selection. */
   public beginResizeInteraction(): Result<ResizeInteractionStart> {
+    this.clearAlignment();
     const snapshot = this.store.snapshot();
     const prepared = prepareSelectionResize(snapshot.document, snapshot.selection);
     if (!prepared.ok) return prepared;
@@ -339,27 +345,31 @@ export class BringsEditorController {
 
   /** Validate and execute the exact final Core resize command as one history entry. */
   public commitResize(proposal: ResizeInteractionProposal): Result<EditorSnapshot> {
-    const captured = this.captureResizeProposal(proposal);
-    const valid = this.validateToken(captured.token);
-    if (!valid.ok) return valid;
-    const before = this.store.snapshot();
-    if (!sameSelection(before.selection, captured.selection)) {
-      return this.failure('interaction.selection-mismatch', '/selection');
+    try {
+      const captured = this.captureResizeProposal(proposal);
+      const valid = this.validateToken(captured.token);
+      if (!valid.ok) return valid;
+      const before = this.store.snapshot();
+      if (!sameSelection(before.selection, captured.selection)) {
+        return this.failure('interaction.selection-mismatch', '/selection');
+      }
+      const alignment = this.alignmentFor(before.document, captured.selection, captured.token);
+      if (!alignment.ok) return alignment;
+      const expected = alignment.value.resolveResize(captured.input);
+      if (!expected.ok) return expected;
+      if (
+        !sameResize(expected.value.resize, captured.resize) ||
+        !sameGuides(expected.value.guides, captured.guides) ||
+        expected.value.currentPoint.x !== captured.input.currentPoint.x ||
+        expected.value.currentPoint.y !== captured.input.currentPoint.y
+      ) {
+        return this.failure('interaction.resize-mismatch', '/resize');
+      }
+      const result = this.store.execute(captured.resize.command);
+      return this.finishOperation(before.selection, result);
+    } finally {
+      this.clearAlignment();
     }
-    const alignment = this.alignmentFor(before.document, captured.selection, captured.token);
-    if (!alignment.ok) return alignment;
-    const expected = alignment.value.resolveResize(captured.input);
-    if (!expected.ok) return expected;
-    if (
-      !sameResize(expected.value.resize, captured.resize) ||
-      !sameGuides(expected.value.guides, captured.guides) ||
-      expected.value.currentPoint.x !== captured.input.currentPoint.x ||
-      expected.value.currentPoint.y !== captured.input.currentPoint.y
-    ) {
-      return this.failure('interaction.resize-mismatch', '/resize');
-    }
-    const result = this.store.execute(captured.resize.command);
-    return this.finishOperation(before.selection, result);
   }
 
   /** Propose a normalized point selection without mutating the Core store. */
@@ -440,16 +450,34 @@ export class BringsEditorController {
 
   /** Commit one normalized ephemeral selection if its interaction token is current. */
   public commitSelection(proposal: SelectionProposal): Result<EditorSnapshot> {
-    const prepared = this.prepareCommitProposal(proposal);
-    if (!prepared.ok) return prepared;
-    return this.finishOperation(
-      prepared.value.before.selection,
-      this.store.setSelection(prepared.value.selection),
-    );
+    try {
+      const prepared = this.prepareCommitProposal(proposal);
+      if (!prepared.ok) return prepared;
+      return this.finishOperation(
+        prepared.value.before.selection,
+        this.store.setSelection(prepared.value.selection),
+      );
+    } finally {
+      this.clearAlignment();
+    }
   }
 
   /** Atomically commit a proposed selection and one page-space translation. */
   public commitMove(
+    input: Readonly<{
+      proposal: SelectionProposal;
+      delta: PageDelta;
+      alignment?: MoveInteractionProposal;
+    }>,
+  ): Result<EditorSnapshot> {
+    try {
+      return this.commitMoveOwned(input);
+    } finally {
+      this.clearAlignment();
+    }
+  }
+
+  private commitMoveOwned(
     input: Readonly<{
       proposal: SelectionProposal;
       delta: PageDelta;
@@ -692,24 +720,27 @@ export class BringsEditorController {
     selection: StructuralSelection,
     token: SelectionInteractionToken,
   ): void {
+    this.alignment = null;
     if (selection.nodeIds.length === 0) return;
     const key = this.alignmentKey(token, selection);
-    if (this.alignments.has(key)) return;
     const prepared = prepareSelectionAlignment(document, selection);
-    if (prepared.ok) this.alignments.set(key, prepared.value);
+    if (prepared.ok) this.alignment = Object.freeze({ key, value: prepared.value });
   }
 
   private alignmentFor(
     document: BringsDocument,
     selection: StructuralSelection,
     token: SelectionInteractionToken,
-  ): Result<ReturnType<typeof prepareSelectionAlignment> extends Result<infer T> ? T : never> {
+  ): Result<PreparedAlignment> {
     const key = this.alignmentKey(token, selection);
-    const cached = this.alignments.get(key);
-    if (cached !== undefined) return { ok: true, value: cached };
+    if (this.alignment?.key === key) return { ok: true, value: this.alignment.value };
     const prepared = prepareSelectionAlignment(document, selection);
-    if (prepared.ok) this.alignments.set(key, prepared.value);
+    this.alignment = prepared.ok ? Object.freeze({ key, value: prepared.value }) : null;
     return prepared;
+  }
+
+  private clearAlignment(): void {
+    this.alignment = null;
   }
 
   private sameToken(left: SelectionInteractionToken, right: SelectionInteractionToken): boolean {
@@ -795,6 +826,7 @@ export class BringsEditorController {
     before: StructuralSelection,
     result: Result<EditorSnapshot>,
   ): Result<EditorSnapshot> {
+    this.clearAlignment();
     if (result.ok && !sameSelection(before, result.value.selection)) {
       this.selectionGeneration += 1;
     }
@@ -817,6 +849,9 @@ export class BringsEditorController {
   }
 
   private failure(code: string, path: string): Result<never> {
+    if (code === 'interaction.stale' || code === 'interaction.selection-mismatch') {
+      this.clearAlignment();
+    }
     const error: BringsError = { code, path };
     return { ok: false, error };
   }

@@ -1432,7 +1432,7 @@ test('prioritizes an Alt resize hit while preserving unsupported Alt behavior on
   expect(miss.commits).toEqual([]);
 });
 
-test('routes only the resize owner and samples Shift and Alt dynamically through one commit', () => {
+test('routes only the resize owner and commits the last displayed modifier sample', () => {
   const state = resizePorts();
   const errors: Array<Readonly<{ code: string; path: string }>> = [];
   const shell = new EditorShell(1440, 900, {
@@ -1479,11 +1479,8 @@ test('routes only the resize owner and samples Shift and Alt dynamically through
   expect(errors).toEqual([]);
   expect(
     state.samples.map(({ preserveAspectRatio, fromCenter }) => [preserveAspectRatio, fromCenter]),
-  ).toEqual([
-    [true, false],
-    [false, true],
-  ]);
-  expect(state.commits).toHaveLength(1);
+  ).toEqual([[true, false]]);
+  expect(state.commits).toEqual([state.proposals[0]]);
   dispatchPointer(shell, 'pointerup', { pointerId: 86, x: 250, y: 240 });
   expect(state.commits).toHaveLength(1);
 });

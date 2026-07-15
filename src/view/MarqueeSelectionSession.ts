@@ -449,18 +449,19 @@ export class MarqueeSelectionSession {
   ): SelectionGestureEffect {
     if (this.phase === 'terminal') return IGNORE_EFFECT;
     const version = this.stateVersion;
-    const captured = this.captureOwnerSample(sample, version);
-    if (captured === null) return IGNORE_EFFECT;
-    this.currentSample = captured;
-    const outcome = this.advance(captured, provider, version);
-    if (outcome.kind === 'interrupted') return IGNORE_EFFECT;
-    if (outcome.kind === 'effect' && outcome.effect.kind === 'discard') {
-      return outcome.effect;
-    }
     if (this.phase !== 'moving') {
+      const captured = this.captureOwnerSample(sample, version);
+      if (captured === null) return IGNORE_EFFECT;
+      this.currentSample = captured;
+      const outcome = this.advance(captured, provider, version);
+      if (outcome.kind === 'interrupted') return IGNORE_EFFECT;
+      if (outcome.kind === 'effect' && outcome.effect.kind === 'discard') {
+        return outcome.effect;
+      }
       this.markTerminal('commit-selection');
       return freezeCommitSelection(this.currentProposal);
     }
+    if (!this.ownsPointer(sample, version)) return IGNORE_EFFECT;
     const delta = this.latestVisual?.movementDelta;
     if (delta === null || delta === undefined) {
       return this.discard(
@@ -530,6 +531,20 @@ export class MarqueeSelectionSession {
       return Object.freeze({ pointerId, viewportPoint, pagePoint, shiftKey });
     } catch (error) {
       if (error === INTERRUPTED) return null;
+      throw error;
+    }
+  }
+
+  private ownsPointer(sample: SelectionPointerSample, version: number): boolean {
+    try {
+      return (
+        guardedRead(
+          () => sample.pointerId,
+          () => this.isCurrent(version),
+        ) === this.ownerPointerId
+      );
+    } catch (error) {
+      if (error === INTERRUPTED) return false;
       throw error;
     }
   }

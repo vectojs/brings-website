@@ -148,6 +148,39 @@ function snapshotToken(
   });
 }
 
+function snapshotPageDelta(delta: PageDelta, guard?: SnapshotGuard): PageDelta {
+  return Object.freeze({
+    x: guardedRead(() => delta.x, guard),
+    y: guardedRead(() => delta.y, guard),
+  }) as PageDelta;
+}
+
+function snapshotMoveProposal(
+  proposal: MoveInteractionProposal,
+  guard?: SnapshotGuard,
+): MoveInteractionProposal {
+  const guides = guardedRead(() => proposal.guides, guard);
+  return Object.freeze({
+    token: snapshotToken(
+      guardedRead(() => proposal.token, guard),
+      guard,
+    ),
+    selection: snapshotSelection(
+      guardedRead(() => proposal.selection, guard),
+      guard,
+    ),
+    rawDelta: snapshotPageDelta(
+      guardedRead(() => proposal.rawDelta, guard),
+      guard,
+    ),
+    delta: snapshotPageDelta(
+      guardedRead(() => proposal.delta, guard),
+      guard,
+    ),
+    guides: snapshotGuides(guides, guard),
+  });
+}
+
 function snapshotPoint(
   point: Readonly<{ x: number; y: number }>,
   guard?: SnapshotGuard,
@@ -370,16 +403,11 @@ export class SelectionGestureInterpreter {
           kind === 'commit-selection'
             ? this.ports.commitSelection(proposal as SelectionProposal)
             : kind === 'commit-move'
-              ? this.ports.commitMove({
-                  proposal: proposal as SelectionProposal,
-                  delta: guardedRead(
-                    () =>
-                      (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>).delta,
-                    current,
-                  ),
-                  alignment: (commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>)
-                    .alignment,
-                })
+              ? this.commitMove(
+                  commit as Extract<SelectionGestureEffect, { kind: 'commit-move' }>,
+                  proposal as SelectionProposal,
+                  current,
+                )
               : (this.ports.commitResize?.(
                   snapshotResizeProposal(proposal as ResizeInteractionProposal, current),
                 ) ?? {
@@ -422,5 +450,24 @@ export class SelectionGestureInterpreter {
     this.currentVisual = null;
     this.stateVersion += 1;
     this.ports.markDirty();
+  }
+
+  private commitMove(
+    commit: Extract<SelectionGestureEffect, { kind: 'commit-move' }>,
+    proposal: SelectionProposal,
+    guard: SnapshotGuard,
+  ): Result<EditorSnapshot> {
+    const sourceDelta = guardedRead(() => commit.delta, guard);
+    const delta = snapshotPageDelta(sourceDelta, guard);
+    const sourceAlignment = guardedRead(() => commit.alignment, guard);
+    const alignment =
+      sourceAlignment === undefined ? undefined : snapshotMoveProposal(sourceAlignment, guard);
+    return this.ports.commitMove(
+      Object.freeze({
+        proposal,
+        delta,
+        ...(alignment === undefined ? {} : { alignment }),
+      }),
+    );
   }
 }

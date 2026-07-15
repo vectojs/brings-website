@@ -780,6 +780,31 @@ test('recomputes a snapped move from its raw delta before committing the exact d
   ).toEqual([1, 0, 0, 1, 50, 10]);
 });
 
+test('keeps at most one prepared alignment and clears it on terminal or stale paths', () => {
+  const controller = populatedController();
+  unwrap(controller.selectAt(20, 20));
+
+  const first = controller.beginSelectionInteraction();
+  expect(controller.debugPreparedAlignmentCount()).toBe(1);
+  for (let index = 0; index < 20; index += 1) controller.beginSelectionInteraction();
+  expect(controller.debugPreparedAlignmentCount()).toBe(1);
+
+  const selected = unwrap(
+    controller.proposePointSelection({ start: first, point: pagePoint(20, 20), mode: 'replace' }),
+  ).proposal;
+  unwrap(controller.commitSelection(selected));
+  expect(controller.debugPreparedAlignmentCount()).toBe(0);
+
+  const stale = controller.beginSelectionInteraction();
+  expect(controller.debugPreparedAlignmentCount()).toBe(1);
+  unwrap(controller.moveSelectionBy(1, 0));
+  expect(controller.debugPreparedAlignmentCount()).toBe(0);
+  expect(
+    controller.proposePointSelection({ start: stale, point: pagePoint(110, 20), mode: 'replace' }),
+  ).toEqual({ ok: false, error: { code: 'interaction.stale', path: '/interaction' } });
+  expect(controller.debugPreparedAlignmentCount()).toBe(0);
+});
+
 test('Core-normalizes a caller-owned parent and child proposal before commit', () => {
   const ids = [
     '11111111-1111-4111-8111-111111111111',

@@ -7,7 +7,6 @@ import type {
   StructuralSelection,
 } from '@vectojs/brings-core';
 import {
-  pageDeltaBetween,
   viewportPoint,
   viewportToPagePoint,
   type EditorPagePoint,
@@ -231,16 +230,13 @@ test('previews and commits the exact frozen Core move alignment result once', ()
   expect(Object.isFrozen(preview.visual.guides)).toBe(true);
   expect(Object.isFrozen(preview.visual.guides?.[0])).toBe(true);
 
-  const commit = session.finish(pointerSample(91, 37, 8), fixture.provider);
+  const commit = session.finish(pointerSample(91, 99, 44, true), fixture.provider);
   expect(commit).toMatchObject({
     kind: 'commit-move',
     delta: { x: 42, y: 8 },
     guides,
   });
-  expect(moveCalls).toEqual([
-    { x: 37, y: 8 },
-    { x: 37, y: 8 },
-  ]);
+  expect(moveCalls).toEqual([{ x: 37, y: 8 }]);
 });
 
 test('clears move guides on unsnapped, stale, and cancelled samples', () => {
@@ -467,24 +463,19 @@ test('obtains an object movement proposal once and reuses it for later deltas', 
   expect(log.point.map(({ mode }) => mode)).toEqual(['replace', 'replace']);
 });
 
-test('finishes marquee and object movement with exactly one matching commit', () => {
+test('finishes marquee and keeps a no-preview object gesture as selection', () => {
   const start = interactionStart();
   const marquee = providerFixture({ ownerId: null });
   const moving = providerFixture({ ownerId: third });
   const marqueeSession = beginSession(start, pointerSample(14, 10, 10), marquee.provider);
   const movingSession = beginSession(start, pointerSample(15, 10, 10), moving.provider);
-  const expectedDelta = unwrap(
-    pageDeltaBetween(pointerSample(15, 10, 10).pagePoint, pointerSample(15, 16, 13).pagePoint),
-  );
-
   expect(marqueeSession.finish(pointerSample(14, 4, 3, true), marquee.provider)).toEqual({
     kind: 'commit-selection',
     proposal: selectionProposal(start, [first, second, third]),
   });
   expect(movingSession.finish(pointerSample(15, 16, 13), moving.provider)).toEqual({
-    kind: 'commit-move',
+    kind: 'commit-selection',
     proposal: selectionProposal(start, [third]),
-    delta: expectedDelta,
   });
   expect(marqueeSession.finish(pointerSample(14, 4, 3), marquee.provider)).toEqual({
     kind: 'ignore',
@@ -494,15 +485,15 @@ test('finishes marquee and object movement with exactly one matching commit', ()
   });
 });
 
-test('commits a drag proposal as selection when a moving gesture returns to zero delta', () => {
+test('commits the last displayed move when pointerup returns to the origin', () => {
   const start = interactionStart();
   const { provider } = providerFixture({ ownerId: third });
   const session = beginSession(start, pointerSample(16, 10, 10, true), provider);
   expect(session.update(pointerSample(16, 14, 10), provider).kind).toBe('preview');
 
-  expect(session.finish(pointerSample(16, 10, 10, false), provider)).toEqual({
-    kind: 'commit-selection',
-    proposal: selectionProposal(start, [first, second, third]),
+  expect(session.finish(pointerSample(16, 10, 10, false), provider)).toMatchObject({
+    kind: 'commit-move',
+    delta: { x: 4, y: 0 },
   });
 });
 
@@ -1004,7 +995,7 @@ test('detaches and freezes move proposals, visuals, derived values, and errors',
   expect(committed).toMatchObject({
     kind: 'commit-move',
     proposal: { selection: { nodeIds: [first, second, third] } },
-    delta: { x: 8, y: 0 },
+    delta: { x: 4, y: 0 },
   });
   if (committed.kind !== 'commit-move') throw new Error('move fixture failed');
   expect(Object.isFrozen(committed)).toBe(true);

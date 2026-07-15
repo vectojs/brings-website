@@ -384,9 +384,24 @@ export class ResizeSelectionSession {
   /** Commit the latest valid non-identity proposal exactly once. */
   public finish(
     sample: ResizePointerSample,
-    provider: ResizeProposalProvider,
+    _provider: ResizeProposalProvider,
   ): SelectionGestureEffect {
-    return this.advance(sample, provider, true);
+    if (this.phase === 'terminal') return IGNORE_EFFECT;
+    const version = this.stateVersion;
+    try {
+      const pointerId = guardedRead(
+        () => sample.pointerId,
+        () => this.isCurrent(version),
+      );
+      if (pointerId !== this.ownerPointerId) return IGNORE_EFFECT;
+    } catch (error) {
+      if (error === INTERRUPTED) return IGNORE_EFFECT;
+      return this.markDiscard(
+        'error',
+        Object.freeze({ code: 'interaction.coordinate-invalid', path: '/resize/pointerId' }),
+      );
+    }
+    return this.latestProposal === null ? this.markDiscard('no-change') : this.commitLatest();
   }
 
   /** Cancel the owner stream without mutating durable Core state. */
