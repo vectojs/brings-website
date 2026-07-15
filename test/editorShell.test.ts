@@ -405,6 +405,29 @@ test('renders ordered interactive layer rows from the Core snapshot', () => {
   expect(visibility).toEqual([second]);
 });
 
+test('projects selected-node properties and commits only through the Core port', () => {
+  const selected = editorSnapshot([second]);
+  const patches: unknown[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => selected,
+    setSelectionProperties: (patch) => {
+      patches.push(patch);
+      return { ok: true, value: selected };
+    },
+  });
+  shell.render(recordingRenderer().renderer);
+
+  const name = childById(shell, 'brings-property-name');
+  const opacity = childById(shell, 'brings-property-opacity');
+  const visible = childById(shell, 'brings-property-visible');
+  expect(name.getA11yAttributes()).toMatchObject({ label: 'Name', value: 'Rectangle' });
+  expect(opacity.getA11yAttributes()).toMatchObject({ label: 'Opacity', value: '100' });
+  expect(visible.getA11yAttributes()).toEqual({ role: 'switch', label: 'Visible', checked: true });
+
+  visible.dispatchEvent(new VectoJSEvent('pointerdown', visible, { button: 0 }));
+  expect(patches).toEqual([{ visible: false }]);
+});
+
 test('keeps closed drawers out of hit testing and accessibility projection', () => {
   const shell = new EditorShell(1024, 768);
   const properties = childById(shell, 'brings-properties');

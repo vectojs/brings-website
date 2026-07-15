@@ -43,6 +43,7 @@ const shell = new EditorShell(1, 1, {
   documentSnapshot: () => editor.snapshot(),
   selectLayer: (nodeIds, activeNodeId) => editor.setLayerSelection(nodeIds, activeNodeId),
   setLayerVisibility: (nodeId) => editor.toggleLayerVisibility(nodeId),
+  setSelectionProperties: (patch) => editor.setSelectionProperties(patch),
   createAt: (tool, x, y) =>
     tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y),
   beginSelectionInteraction: () => editor.beginSelectionInteraction(),

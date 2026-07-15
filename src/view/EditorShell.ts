@@ -5,12 +5,14 @@ import {
   type IRenderer,
   type VectoJSEvent,
 } from '@vectojs/core';
+import { Input } from '@vectojs/ui/input';
 import type {
   AlignmentGuide,
   BringsError,
   EditorSnapshot,
   Matrix,
   NodeId,
+  NodePropertyPatchInput,
   ResizeBounds,
   ResizeHandle,
   ResizePoint,
@@ -346,6 +348,7 @@ export interface EditorShellPorts {
   ) => Result<EditorSnapshot>;
   /** Toggle visibility for one row without selecting it first. */
   readonly setLayerVisibility?: (nodeId: string) => Result<EditorSnapshot>;
+  readonly setSelectionProperties?: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
@@ -376,6 +379,7 @@ type ResolvedEditorShellPorts = Readonly<{
   documentSnapshot: () => EditorSnapshot;
   selectLayer: (nodeIds: readonly string[], activeNodeId: string | null) => Result<EditorSnapshot>;
   setLayerVisibility: (nodeId: string) => Result<EditorSnapshot>;
+  setSelectionProperties: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   createAt: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
@@ -428,6 +432,7 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
 > = {
   selectLayer: () => unavailable('layer.selection-unavailable'),
   setLayerVisibility: () => unavailable('layer.visibility-unavailable'),
+  setSelectionProperties: () => unavailable('properties.unavailable'),
   createAt: () => unavailable('shape.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
@@ -460,6 +465,8 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
     documentSnapshot,
     selectLayer: ports.selectLayer ?? DEFAULT_EDITOR_SHELL_PORTS.selectLayer,
     setLayerVisibility: ports.setLayerVisibility ?? DEFAULT_EDITOR_SHELL_PORTS.setLayerVisibility,
+    setSelectionProperties:
+      ports.setSelectionProperties ?? DEFAULT_EDITOR_SHELL_PORTS.setSelectionProperties,
     createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
     beginSelectionInteraction:
       ports.beginSelectionInteraction ??
@@ -683,6 +690,50 @@ class LayerRow extends Entity {
   }
 }
 
+class PropertyToggle extends Entity {
+  public checked = false;
+
+  public constructor(
+    id: string,
+    private readonly label: string,
+    private readonly onChange: (checked: boolean) => void,
+  ) {
+    super(id);
+    this.width = 90;
+    this.height = 18;
+    this.interactive = true;
+    this.on('pointerdown', (event) => {
+      event.preventDefault();
+      this.onChange(!this.checked);
+    });
+  }
+
+  public override getA11yAttributes(): A11yAttributes {
+    return { role: 'switch', label: this.label, checked: this.checked };
+  }
+
+  public override isPointInside(globalX: number, globalY: number): boolean {
+    const local = this.worldToLocal(globalX, globalY);
+    return (
+      local !== null &&
+      local.x >= 0 &&
+      local.x <= this.width &&
+      local.y >= 0 &&
+      local.y <= this.height
+    );
+  }
+
+  public override render(renderer: IRenderer): void {
+    renderer.fillText(this.label, 0, 14, '500 12px system-ui, sans-serif', '#dbe5f3');
+    renderer.beginPath();
+    renderer.roundRect(56, 0, 34, 18, 9);
+    renderer.fill(this.checked ? '#4f7dd4' : '#465268');
+    renderer.beginPath();
+    renderer.roundRect(this.checked ? 74 : 58, 2, 14, 14, 7);
+    renderer.fill('#f8fafc');
+  }
+}
+
 /**
  * The first canvas-native Brings surface. It owns explicit numeric panel bounds;
  * later tools reconcile document entities below the `canvasRegion` seam.
@@ -753,6 +804,13 @@ export class EditorShell extends Entity {
   });
   private readonly layerRows = new Map<NodeId, LayerRow>();
   private layerSignature = '';
+  private readonly nameInput: Input;
+  private readonly opacityInput: Input;
+  private readonly widthInput: Input;
+  private readonly heightInput: Input;
+  private readonly visibleToggle: PropertyToggle;
+  private readonly lockedToggle: PropertyToggle;
+  private propertySignature = '';
   private activeDrawer: DrawerSide | null = null;
   private activeTool: CanvasTool = 'select';
   private selectionSession: MarqueeSelectionSession | null = null;
@@ -774,6 +832,12 @@ export class EditorShell extends Entity {
   public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
     super('brings-editor-shell');
     this.ports = resolveEditorShellPorts(ports);
+    this.nameInput = this.createPropertyInput('brings-property-name', 'Name');
+    this.opacityInput = this.createPropertyInput('brings-property-opacity', 'Opacity');
+    this.widthInput = this.createPropertyInput('brings-property-width', 'Width');
+    this.heightInput = this.createPropertyInput('brings-property-height', 'Height');
+    this.visibleToggle = this.createPropertyToggle('brings-property-visible', 'Visible', 'visible');
+    this.lockedToggle = this.createPropertyToggle('brings-property-locked', 'Locked', 'locked');
     this.selectionProvider = {
       point: (start, point, mode) => this.ports.proposePointSelection(start, point, mode),
       area: (start, rect, mode) => this.ports.proposeAreaSelection(start, rect, mode),
@@ -804,6 +868,12 @@ export class EditorShell extends Entity {
     this.canvasRegion.add(this.mobileModeLabel);
     this.canvasRegion.add(this.mobileModeNotice);
     this.properties.add(this.propertiesLabel);
+    this.properties.add(this.nameInput);
+    this.properties.add(this.opacityInput);
+    this.properties.add(this.widthInput);
+    this.properties.add(this.heightInput);
+    this.properties.add(this.visibleToggle);
+    this.properties.add(this.lockedToggle);
     this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
     // A panel must participate in hit testing so its interactive row descendants can own events.
     this.layers.setPointerHandler(() => undefined);
@@ -811,6 +881,7 @@ export class EditorShell extends Entity {
     this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
     this.resize(width, height);
     this.syncLayerRows();
+    this.syncProperties();
   }
 
   /** True while the narrow-screen shell supports editing tools. */
@@ -901,6 +972,7 @@ export class EditorShell extends Entity {
 
   public override render(renderer: IRenderer): void {
     this.syncLayerRows();
+    this.syncProperties();
     const { toolbarHeight, viewport } = this.layout;
     const toolbarHeightInScene = Math.min(toolbarHeight, this.height);
 
@@ -959,6 +1031,7 @@ export class EditorShell extends Entity {
     if (!leftOpen) this.layers.setFrame(0, 0, 0, 0, false);
     if (!rightOpen) this.properties.setFrame(0, 0, 0, 0, false);
     this.layoutLayerRows();
+    this.layoutProperties();
   }
 
   private syncLayerRows(): void {
@@ -1034,6 +1107,110 @@ export class EditorShell extends Entity {
     };
     for (const rootId of page.rootNodeIds) visit(rootId, 0);
     return layers;
+  }
+
+  private createPropertyInput(id: string, placeholder: string): Input {
+    const input = new Input({
+      width: 200,
+      height: 28,
+      placeholder,
+      font: '500 12px system-ui, sans-serif',
+      bg: '#222936',
+      border: '#3c4759',
+      color: '#f8fafc',
+      onChange: () => this.scene?.markDirty(),
+    });
+    input.id = id;
+    input.on('keydown', (event: VectoJSEvent) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      this.commitPropertyInput(input);
+    });
+    input.on('blur', () => this.commitPropertyInput(input));
+    return input;
+  }
+
+  private createPropertyToggle(
+    id: string,
+    label: string,
+    property: 'visible' | 'locked',
+  ): PropertyToggle {
+    return new PropertyToggle(id, label, (checked) =>
+      this.commitProperties({ [property]: checked }),
+    );
+  }
+
+  private layoutProperties(): void {
+    const visible = this.properties.interactive && this.propertySignature !== '';
+    const width = Math.max(0, this.properties.width - 40);
+    const setInput = (input: Input, y: number, show = visible): void => {
+      input.x = 20;
+      input.y = y;
+      input.width = width;
+      input.height = show ? 28 : 0;
+      input.interactive = show;
+    };
+    setInput(this.nameInput, 58);
+    setInput(this.opacityInput, 94);
+    setInput(this.widthInput, 130, visible && this.widthInput.value !== '');
+    setInput(this.heightInput, 166, visible && this.heightInput.value !== '');
+    this.visibleToggle.x = 20;
+    this.visibleToggle.y = 208;
+    this.visibleToggle.interactive = visible;
+    this.lockedToggle.x = 120;
+    this.lockedToggle.y = 208;
+    this.lockedToggle.interactive = visible;
+  }
+
+  private syncProperties(): void {
+    const snapshot = this.ports.documentSnapshot();
+    const activeId = snapshot.selection.activeNodeId;
+    const node =
+      activeId === null ? undefined : snapshot.document.nodes.find((item) => item.id === activeId);
+    const signature =
+      node === undefined
+        ? ''
+        : `${node.id}:${node.name}:${node.visible}:${node.locked}:${node.opacity}:${'width' in node ? node.width : ''}:${'height' in node ? node.height : ''}`;
+    if (signature === this.propertySignature) return;
+    this.propertySignature = signature;
+    this.nameInput.value = node?.name ?? '';
+    this.opacityInput.value = node === undefined ? '' : String(Math.round(node.opacity * 100));
+    this.widthInput.value = node !== undefined && 'width' in node ? String(node.width) : '';
+    this.heightInput.value = node !== undefined && 'height' in node ? String(node.height) : '';
+    this.visibleToggle.checked = node?.visible ?? false;
+    this.lockedToggle.checked = node?.locked ?? false;
+    this.layoutProperties();
+  }
+
+  private commitPropertyInput(input: Input): void {
+    if (input === this.nameInput) this.commitProperties({ name: input.value.trim() });
+    else if (input === this.opacityInput)
+      this.commitNumberProperty('opacity', input.value, 0, 100, 0.01);
+    else if (input === this.widthInput)
+      this.commitNumberProperty('width', input.value, 0, Number.MAX_SAFE_INTEGER, 1);
+    else this.commitNumberProperty('height', input.value, 0, Number.MAX_SAFE_INTEGER, 1);
+  }
+
+  private commitNumberProperty(
+    property: 'opacity' | 'width' | 'height',
+    value: string,
+    minimum: number,
+    maximum: number,
+    scale: number,
+  ): void {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) return;
+    this.commitProperties({ [property]: parsed * scale });
+  }
+
+  private commitProperties(patch: NodePropertyPatchInput): void {
+    const snapshot = this.ports.documentSnapshot();
+    if (snapshot.selection.nodeIds.length === 0) return;
+    const result = this.ports.setSelectionProperties(patch);
+    if (result.ok) {
+      this.propertySignature = '';
+      this.scene?.markDirty();
+    }
   }
 
   private renderPanel(renderer: IRenderer, panel: EditorRegion): void {
