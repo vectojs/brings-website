@@ -210,10 +210,9 @@ function snapshotInput(
 }
 
 function snapshotGuides(
-  guides: readonly AlignmentGuide[] | undefined,
+  guides: readonly AlignmentGuide[],
   guard?: SnapshotGuard,
 ): readonly AlignmentGuide[] {
-  if (guides === undefined) return Object.freeze([]);
   const detached: AlignmentGuide[] = [];
   const length = guardedRead(() => guides.length, guard);
   for (let index = 0; index < length; index += 1) {
@@ -255,7 +254,7 @@ function snapshotProposal(
       guardedRead(() => proposal.resize, guard),
       guard,
     ),
-    ...(guides === undefined ? {} : { guides: snapshotGuides(guides, guard) }),
+    guides: snapshotGuides(guides, guard),
   }) as ResizeInteractionProposal;
 }
 
@@ -287,9 +286,7 @@ function freezePreview(proposal: ResizeInteractionProposal): SelectionGestureEff
     marquee: null,
     movementDelta: null,
     resize: proposal.resize,
-    ...(proposal.guides === undefined || proposal.guides.length === 0
-      ? {}
-      : { guides: proposal.guides }),
+    ...(proposal.guides.length === 0 ? {} : { guides: proposal.guides }),
   });
   return Object.freeze({ kind: 'preview', visual });
 }
