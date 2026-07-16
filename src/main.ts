@@ -46,7 +46,11 @@ const shell = new EditorShell(1, 1, {
   setLayerVisibility: (nodeId) => editor.toggleLayerVisibility(nodeId),
   setSelectionProperties: (patch) => editor.setSelectionProperties(patch),
   createAt: (tool, x, y) =>
-    tool === 'frame' ? editor.createFrameAt(x, y) : editor.createRectangleAt(x, y),
+    tool === 'frame'
+      ? editor.createFrameAt(x, y)
+      : tool === 'text'
+        ? editor.createTextAt(x, y)
+        : editor.createRectangleAt(x, y),
   beginSelectionInteraction: () => editor.beginSelectionInteraction(),
   proposePointSelection: (start, point, mode) =>
     editor.proposePointSelection({ start, point, mode }),

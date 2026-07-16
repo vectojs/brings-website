@@ -524,6 +524,24 @@ test('exposes center-anchored zoom toolbar controls without changing the active 
   });
 });
 
+test('keeps text and zoom controls disjoint across compact desktop toolbar layouts', () => {
+  const shell = new EditorShell(700, 600);
+  const text = childById(shell, 'brings-text-tool');
+  const zoomOut = childById(shell, 'brings-zoom-out');
+  const zoomReadout = childById(shell, 'brings-zoom-readout');
+  const zoomIn = childById(shell, 'brings-zoom-in');
+
+  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomIn.x);
+  expect(zoomReadout.width).toBe(0);
+
+  shell.resize(780, 600);
+  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
+  expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
+  expect(zoomIn.x + zoomIn.width).toBeLessThanOrEqual(shell.width);
+});
+
 test('keeps resize handles at eight screen pixels after camera zoom', () => {
   const state = resizePorts();
   const shell = new EditorShell(1440, 900, state.ports);

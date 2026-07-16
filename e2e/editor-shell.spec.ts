@@ -8,6 +8,7 @@ type BrowserDebugSnapshot = Readonly<{
       type: string;
       parentId: string | null;
       transform: readonly number[];
+      content?: string;
       width?: number;
       height?: number;
     }>[];
@@ -342,6 +343,42 @@ test('creates a Frame and nested Rectangle through canvas-native tools', async (
         { type: 'rectangle', parentId: expect.any(String) },
       ],
     });
+});
+
+test('creates selected text and commits native content editing through Core', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: 'Frame', exact: true }).click();
+  await canvas.click({ position: { x: 180, y: 164 } });
+  await page.getByRole('button', { name: 'Text', exact: true }).click();
+  await canvas.click({ position: { x: 220, y: 204 } });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as BrowserDebugApi;
+        return debug.snapshot();
+      }),
+    )
+    .toMatchObject({
+      document: { nodes: [{ type: 'frame' }, { type: 'text', content: 'Text' }] },
+      selection: { activeNodeId: expect.any(String) },
+    });
+
+  const content = page.getByRole('textbox', { name: 'Text content' });
+  await content.fill('Hello Brings');
+  await content.press('Enter');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as BrowserDebugApi;
+        return debug.snapshot().document.nodes.find((node) => node.type === 'text')?.content;
+      }),
+    )
+    .toBe('Hello Brings');
 });
 
 test('selects the frontmost shape from the canvas without changing document history', async ({
