@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added an Ellipse creation tool backed by the public Brings Core command,
+  cubic Bézier rendering with exact Core ellipse hit geometry, layer and
+  property integration, atomic history, and the unmodified `O` shortcut.
+- Added Figma-compatible unmodified V, F, R, O, and T tool shortcuts with
+  native-editor and modified-chord yielding.
+- Upgraded to Brings Core 0.14.0 while retaining the latest published VectoJS
+  Core 1.9.1, UI 1.9.1, and DevTools 0.4.2 releases.
 - Reworked the editor into a professional local-first shell with a slim
   document bar, fixed desktop Pages/Layers and Properties panels, a compact
   viewport-owned tool dock, projected local-save and history state, and a

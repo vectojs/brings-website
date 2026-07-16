@@ -14,7 +14,7 @@ projection.
 The application provides a professional responsive editor shell with a local
 document status bar, fixed desktop Pages/Layers and Properties panels, a
 viewport-owned creation dock, and navigation-only authoring controls on narrow
-screens. It owns a Core-backed document session with Frame, Rectangle, and Text
+screens. It owns a Core-backed document session with Frame, Rectangle, Ellipse, and Text
 creation, ordered layers, selected-node properties, grouping, frontmost canvas
 selection, camera pan/zoom, and local undo/redo history.
 Select-tool drags render a transient VectoJS preview, commit exactly one Core
@@ -27,9 +27,10 @@ interaction ownership out of Core. The focusable VMT design region routes
 Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, and Ctrl+Y to transactional Core undo/redo.
 Delete and Backspace atomically delete the normalized selection as one Core
 command, with selection restoration on undo and native-editor yielding for
-every shortcut.
+every shortcut. Unmodified V, F, R, O, and T switch the canvas-native Select,
+Frame, Rectangle, Ellipse, and Text tools while native editors retain their keys.
 
-The app consumes exact published `@vectojs/brings-core@0.13.0`,
+The app consumes exact published `@vectojs/brings-core@0.14.0`,
 `@vectojs/core@1.9.1`, `@vectojs/ui@1.9.1`, and
 `@vectojs/devtools@0.4.2` registry dependencies, never local workspace links.
 Interaction slices render and mutate only Core-owned state.

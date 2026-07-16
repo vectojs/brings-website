@@ -7,7 +7,7 @@ test('uses both fixed panels on a wide desktop scene', () => {
     leftPanel: { mode: 'visible', width: 248 },
     rightPanel: { mode: 'visible', width: 280 },
     viewport: { x: 248, y: 48, width: 912, height: 852 },
-    toolDock: { mode: 'authoring', x: 480, y: 832, width: 448, height: 48 },
+    toolDock: { mode: 'authoring', x: 458, y: 832, width: 492, height: 48 },
   });
 });
 
@@ -17,7 +17,7 @@ test('turns the properties panel into a drawer on a constrained desktop scene', 
     leftPanel: { mode: 'visible', width: 248 },
     rightPanel: { mode: 'drawer', width: 280 },
     viewport: { x: 248, y: 48, width: 776, height: 720 },
-    toolDock: { mode: 'authoring', x: 412, y: 700, width: 448, height: 48 },
+    toolDock: { mode: 'authoring', x: 390, y: 700, width: 492, height: 48 },
   });
 });
 
@@ -27,7 +27,7 @@ test('uses mutually exclusive drawers below the tablet breakpoint', () => {
     leftPanel: { mode: 'drawer', width: 248 },
     rightPanel: { mode: 'drawer', width: 280 },
     viewport: { x: 0, y: 48, width: 700, height: 552 },
-    toolDock: { mode: 'authoring', x: 126, y: 532, width: 448, height: 48 },
+    toolDock: { mode: 'authoring', x: 104, y: 532, width: 492, height: 48 },
   });
 });
 
@@ -37,7 +37,7 @@ test('keeps the authoring dock inside the reduced viewport at the panel breakpoi
     leftPanel: { mode: 'visible', width: 248 },
     rightPanel: { mode: 'drawer', width: 280 },
     viewport: { x: 248, y: 48, width: 532, height: 552 },
-    toolDock: { mode: 'authoring', x: 290, y: 532, width: 448, height: 48 },
+    toolDock: { mode: 'authoring', x: 268, y: 532, width: 492, height: 48 },
   });
 });
 

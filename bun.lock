@@ -5,7 +5,7 @@
     "": {
       "name": "brings-website",
       "dependencies": {
-        "@vectojs/brings-core": "0.13.0",
+        "@vectojs/brings-core": "0.14.0",
         "@vectojs/core": "1.9.1",
         "@vectojs/ui": "1.9.1",
       },
@@ -383,7 +383,7 @@
 
     "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
 
-    "@vectojs/brings-core": ["@vectojs/brings-core@0.13.0", "", {}, "sha512-0gwuI/oS1AzIVsVfkiCKYw9nX8yEs5KqLOf75fEdm+sLQN02qi2RnPi9GqTw/ua+Md2xaUoVtkpULUSA+cQ4zg=="],
+    "@vectojs/brings-core": ["@vectojs/brings-core@0.14.0", "", {}, "sha512-89RN3QrIPgrMtMsdm9OXFm6LLFF50XyMdXhFFIUbXNeT16v/ZgXKd58d81p/T+5mWr2y+epqdbM3i4hD8DrQyA=="],
 
     "@vectojs/core": ["@vectojs/core@1.9.1", "", {}, "sha512-uc9eY3mrSYUM6/H/Zve+icmuz/1JmkDR3WQqZPCDsq8PYBm1o17DlCF441J/uR1M+8x4bPbbrFS9bSNNeSH4dg=="],
 

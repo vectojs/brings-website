@@ -1,4 +1,14 @@
-export type EditorShortcutAction = 'undo' | 'redo' | 'delete' | 'group' | 'ungroup';
+export type EditorShortcutAction =
+  | 'undo'
+  | 'redo'
+  | 'delete'
+  | 'group'
+  | 'ungroup'
+  | 'tool-select'
+  | 'tool-frame'
+  | 'tool-rectangle'
+  | 'tool-ellipse'
+  | 'tool-text';
 
 export interface EditorShortcutEvent {
   readonly key?: string;
@@ -17,6 +27,13 @@ export function resolveEditorShortcut(event: EditorShortcutEvent): EditorShortcu
   if (primaryModifier && key === 'g') return event.shiftKey ? 'ungroup' : 'group';
   const deletionModifier = primaryModifier || event.altKey === true || event.shiftKey;
   if (!deletionModifier && (key === 'delete' || key === 'backspace')) return 'delete';
+  if (!deletionModifier) {
+    if (key === 'v') return 'tool-select';
+    if (key === 'f') return 'tool-frame';
+    if (key === 'r') return 'tool-rectangle';
+    if (key === 'o') return 'tool-ellipse';
+    if (key === 't') return 'tool-text';
+  }
   return null;
 }
 

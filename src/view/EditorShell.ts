@@ -85,6 +85,35 @@ function applyAxisAlignedMatrix(renderer: IRenderer, matrix: Matrix): boolean {
   return true;
 }
 
+function appendEllipsePath(
+  renderer: IRenderer,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): void {
+  const radiusX = width / 2;
+  const radiusY = height / 2;
+  const centerX = x + radiusX;
+  const centerY = y + radiusY;
+  const control = 0.5522847498307936;
+  const controlX = radiusX * control;
+  const controlY = radiusY * control;
+  renderer.moveTo(centerX, y);
+  renderer.bezierCurveTo(centerX + controlX, y, x + width, centerY - controlY, x + width, centerY);
+  renderer.bezierCurveTo(
+    x + width,
+    centerY + controlY,
+    centerX + controlX,
+    y + height,
+    centerX,
+    y + height,
+  );
+  renderer.bezierCurveTo(centerX - controlX, y + height, x, centerY + controlY, x, centerY);
+  renderer.bezierCurveTo(x, centerY - controlY, centerX - controlX, y, centerX, y);
+  renderer.closePath();
+}
+
 class EditorRegion extends Entity {
   private pointerHandler: ((event: VectoJSEvent) => void) | null = null;
   private pointerListenerAttached = false;
@@ -132,7 +161,7 @@ class EditorRegion extends Entity {
   public override render(_renderer: IRenderer): void {}
 }
 
-export type CreationTool = 'frame' | 'rectangle' | 'text';
+export type CreationTool = 'frame' | 'rectangle' | 'ellipse' | 'text';
 type CanvasTool = 'select' | CreationTool;
 
 type NativePointerSnapshot = Readonly<{
@@ -563,7 +592,15 @@ class LayerRow extends Entity {
       renderer.fill('#385a98');
     }
     const glyph =
-      item.type === 'frame' ? '□' : item.type === 'group' ? '◇' : item.type === 'text' ? 'T' : '◆';
+      item.type === 'frame'
+        ? '□'
+        : item.type === 'group'
+          ? '◇'
+          : item.type === 'ellipse'
+            ? '○'
+            : item.type === 'text'
+              ? 'T'
+              : '◆';
     renderer.fillText(glyph, 6, 17, '600 11px system-ui, sans-serif', '#aebed6');
     renderer.fillText(item.name, 24, 17, '500 12px system-ui, sans-serif', '#f3f6fb');
     if (item.locked)
@@ -761,6 +798,9 @@ export class EditorShell extends Entity {
       this.activateTool('rectangle');
     },
   );
+  private readonly ellipseTool = new ToolbarButton('brings-ellipse-tool', 'Ellipse', '○', () => {
+    this.activateTool('ellipse');
+  });
   private readonly textTool = new ToolbarButton('brings-text-tool', 'Text', 'T', () => {
     this.activateTool('text');
   });
@@ -781,6 +821,7 @@ export class EditorShell extends Entity {
     this.selectTool,
     this.frameTool,
     this.rectangleTool,
+    this.ellipseTool,
     this.textTool,
     this.zoomOutTool,
     this.zoomReadout,
@@ -1062,8 +1103,9 @@ export class EditorShell extends Entity {
     this.selectTool.setFrame(0, 0, 36, this.activeTool === 'select');
     this.frameTool.setFrame(44, 0, 36, this.activeTool === 'frame', authoring);
     this.rectangleTool.setFrame(88, 0, 36, this.activeTool === 'rectangle', authoring);
-    this.textTool.setFrame(132, 0, 36, this.activeTool === 'text', authoring);
-    const zoomStart = authoring ? 204 : 44;
+    this.ellipseTool.setFrame(132, 0, 36, this.activeTool === 'ellipse', authoring);
+    this.textTool.setFrame(176, 0, 36, this.activeTool === 'text', authoring);
+    const zoomStart = authoring ? 248 : 44;
     this.zoomOutTool.setFrame(zoomStart, 0, 36, false);
     this.zoomReadout.setFrame(zoomStart + 40, 0, true, this.camera.state.zoom);
     this.zoomInTool.setFrame(zoomStart + 116, 0, 36, false);
@@ -1392,6 +1434,18 @@ export class EditorShell extends Entity {
           renderer.setGlobalAlpha(1);
           renderer.beginPath();
           renderer.roundRect(-2, -2, node.width + 4, node.height + 4, [...node.cornerRadii]);
+          renderer.stroke('#2563eb', 2);
+        }
+      } else if (node.type === 'ellipse') {
+        renderer.setGlobalAlpha(opacity);
+        renderer.beginPath();
+        appendEllipsePath(renderer, 0, 0, node.width, node.height);
+        if (node.fill !== null) renderer.fill(this.paint(node.fill));
+        if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+        if (selected.has(node.id)) {
+          renderer.setGlobalAlpha(1);
+          renderer.beginPath();
+          appendEllipsePath(renderer, -2, -2, node.width + 4, node.height + 4);
           renderer.stroke('#2563eb', 2);
         }
       } else if (node.type === 'text') {
@@ -2214,6 +2268,23 @@ export class EditorShell extends Entity {
 
     event.preventDefault();
     event.stopPropagation();
+    switch (action) {
+      case 'tool-select':
+        this.activateTool('select');
+        return;
+      case 'tool-frame':
+        this.activateTool('frame');
+        return;
+      case 'tool-rectangle':
+        this.activateTool('rectangle');
+        return;
+      case 'tool-ellipse':
+        this.activateTool('ellipse');
+        return;
+      case 'tool-text':
+        this.activateTool('text');
+        return;
+    }
     const result =
       action === 'delete'
         ? this.ports.deleteSelection()
