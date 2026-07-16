@@ -399,11 +399,12 @@ test('projects the named Brings application and primary editor regions', () => {
     role: 'application',
     label: 'Brings design editor',
   });
-  expect(shell.children.slice(0, 4).map((child) => child.getA11yAttributes())).toEqual([
-    { role: 'toolbar', label: 'Tools' },
+  expect(shell.children.slice(0, 5).map((child) => child.getA11yAttributes())).toEqual([
+    { role: 'toolbar', label: 'Document controls' },
     { role: 'tree', label: 'Layers' },
     { role: 'region', label: 'Design canvas', tabIndex: 0 },
     { role: 'group', label: 'Properties' },
+    { role: 'toolbar', label: 'Creation tools' },
   ]);
 });
 
@@ -524,22 +525,71 @@ test('exposes center-anchored zoom toolbar controls without changing the active 
   });
 });
 
-test('keeps text and zoom controls disjoint across compact desktop toolbar layouts', () => {
+test('keeps authoring and navigation controls inside the viewport-owned dock', () => {
   const shell = new EditorShell(700, 600);
+  const dock = childById(shell, 'brings-tool-dock');
   const text = childById(shell, 'brings-text-tool');
   const zoomOut = childById(shell, 'brings-zoom-out');
   const zoomReadout = childById(shell, 'brings-zoom-readout');
   const zoomIn = childById(shell, 'brings-zoom-in');
 
   expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
-  expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomIn.x);
-  expect(zoomReadout.width).toBe(0);
+  expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
+  expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
+  expect({ x: dock.x, y: dock.y, width: dock.width, height: dock.height }).toEqual({
+    x: 126,
+    y: 532,
+    width: 448,
+    height: 48,
+  });
 
   shell.resize(780, 600);
   expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
   expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
   expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
-  expect(zoomIn.x + zoomIn.width).toBeLessThanOrEqual(shell.width);
+
+  shell.resize(390, 600);
+  expect(childById(shell, 'brings-frame-tool').width).toBe(0);
+  expect(childById(shell, 'brings-rectangle-tool').width).toBe(0);
+  expect(text.width).toBe(0);
+  expect(zoomIn.x + zoomIn.width + 8).toBeLessThanOrEqual(dock.width);
+});
+
+test('projects local document state and routes enabled history controls through Core ports', () => {
+  let snapshot = { ...editorSnapshot(), undoDepth: 2, redoDepth: 0 };
+  const actions: Array<'undo' | 'redo'> = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => snapshot,
+    runHistory: (action) => {
+      actions.push(action);
+      snapshot = { ...snapshot, undoDepth: 1, redoDepth: 1 };
+      return { ok: true, value: snapshot };
+    },
+  });
+  const documentName = childById(shell, 'brings-document-name');
+  const localStatus = childById(shell, 'brings-local-status');
+  const undo = childById(shell, 'brings-undo');
+  const redo = childById(shell, 'brings-redo');
+
+  expect(documentName.getContentProjection()).toMatchObject({ text: 'Fixture' });
+  expect(localStatus.getContentProjection()).toMatchObject({ text: 'Saved locally' });
+  expect(undo.getA11yAttributes()).toEqual({ role: 'button', label: 'Undo' });
+  expect(redo.getA11yAttributes()).toEqual({ role: 'button', label: 'Redo', disabled: true });
+
+  undo.dispatchEvent(new VectoJSEvent('pointerdown', undo, { preventDefault: () => undefined }));
+  expect(actions).toEqual(['undo']);
+  expect(redo.getA11yAttributes()).toEqual({ role: 'button', label: 'Redo' });
+});
+
+test('refreshes projected history availability after an external Core command', () => {
+  let snapshot = editorSnapshot();
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => snapshot });
+  const undo = childById(shell, 'brings-undo');
+
+  expect(undo.getA11yAttributes()).toEqual({ role: 'button', label: 'Undo', disabled: true });
+  snapshot = { ...snapshot, undoDepth: 1 };
+  shell.render(recordingRenderer().renderer);
+  expect(undo.getA11yAttributes()).toEqual({ role: 'button', label: 'Undo' });
 });
 
 test('keeps resize handles at eight screen pixels after camera zoom', () => {
@@ -705,14 +755,20 @@ test('keeps mobile drawers exclusive and marks phone layouts view-only', () => {
 });
 
 test('projects static chrome labels without making them pointer targets', () => {
-  const shell = new EditorShell(1440, 900);
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => editorSnapshot() });
   const title = childById(shell, 'brings-title');
   const workspace = childById(shell, 'brings-workspace-label');
+  const activePage = childById(shell, 'brings-active-page');
+  const propertiesEmpty = childById(shell, 'brings-properties-empty');
 
   expect(title.interactive).toBe(false);
   expect(title.getContentProjection()).toMatchObject({ text: 'Brings' });
   expect(workspace.getContentProjection()).toMatchObject({
     text: 'Local-first design workspace',
+  });
+  expect(activePage.getContentProjection()).toMatchObject({ text: 'Page 1' });
+  expect(propertiesEmpty.getContentProjection()).toMatchObject({
+    text: 'Select an object to edit properties',
   });
 });
 
@@ -797,7 +853,7 @@ test('yields deletion to native editors and ignores key events outside the desig
     },
   });
   const canvasRegion = childById(shell, 'brings-canvas-region');
-  const toolbar = childById(shell, 'brings-toolbar');
+  const fileBar = childById(shell, 'brings-file-bar');
 
   canvasRegion.dispatchEvent(
     new VectoJSEvent('keydown', canvasRegion, {
@@ -809,8 +865,8 @@ test('yields deletion to native editors and ignores key events outside the desig
       preventDefault: () => undefined,
     }),
   );
-  toolbar.dispatchEvent(
-    new VectoJSEvent('keydown', toolbar, {
+  fileBar.dispatchEvent(
+    new VectoJSEvent('keydown', fileBar, {
       key: 'Delete',
       ctrlKey: false,
       metaKey: false,

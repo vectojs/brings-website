@@ -2,7 +2,9 @@ import {
   type A11yAttributes,
   type ContentProjection,
   Entity,
+  Group,
   type IRenderer,
+  Rect,
   type VectoJSEvent,
 } from '@vectojs/core';
 import { Input } from '@vectojs/ui/input';
@@ -23,6 +25,7 @@ import type {
 import type { BringsLayerItem } from '../editor/BringsEditorController';
 import { editorPagePoint, viewportPoint, type PageDelta } from '../editor/selectionCoordinates';
 import { createCameraViewport, normalizeWheelDelta } from './CameraViewport';
+import { CanvasLabel, MobileModeNotice, ToolbarButton, ZoomReadout } from './EditorChrome';
 import type {
   ResizeInteractionProposal,
   ResizeInteractionStart,
@@ -503,153 +506,6 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
   };
 }
 
-class ToolbarButton extends Entity {
-  private active = false;
-
-  public constructor(
-    id: string,
-    private readonly label: string,
-    private readonly onActivate: () => void,
-  ) {
-    super(id);
-    this.interactive = true;
-    this.on('pointerdown', (event) => {
-      event.preventDefault();
-      this.onActivate();
-    });
-  }
-
-  public setFrame(x: number, y: number, active: boolean): void {
-    this.x = x;
-    this.y = y;
-    this.width = 88;
-    this.height = 32;
-    this.active = active;
-  }
-
-  public override getA11yAttributes(): A11yAttributes {
-    return { role: 'button', label: this.active ? `${this.label} tool selected` : this.label };
-  }
-
-  public override isPointInside(globalX: number, globalY: number): boolean {
-    const local = this.worldToLocal(globalX, globalY);
-    return (
-      local !== null &&
-      local.x >= 0 &&
-      local.x <= this.width &&
-      local.y >= 0 &&
-      local.y <= this.height
-    );
-  }
-
-  public override render(renderer: IRenderer): void {
-    renderer.beginPath();
-    renderer.roundRect(0, 0, this.width, this.height, 6);
-    renderer.fill(this.active ? '#2563eb' : '#3a404b');
-    renderer.fillText(this.label, 12, 21, '600 12px system-ui, sans-serif', '#f8fafc');
-  }
-}
-
-class ZoomReadout extends Entity {
-  private visible = false;
-  private zoomLevel = 1;
-
-  public constructor() {
-    super('brings-zoom-readout');
-    this.interactive = false;
-  }
-
-  public setFrame(x: number, y: number, visible: boolean, zoom: number): void {
-    this.x = x;
-    this.y = y;
-    this.width = visible ? 72 : 0;
-    this.height = visible ? 32 : 0;
-    this.visible = visible;
-    this.zoomLevel = zoom;
-  }
-
-  public override getA11yAttributes(): A11yAttributes {
-    return { role: 'status', label: `Zoom ${Math.round(this.zoomLevel * 100)}%` };
-  }
-
-  public override isPointInside(): boolean {
-    return false;
-  }
-
-  public override render(renderer: IRenderer): void {
-    if (!this.visible) return;
-    renderer.fillText(
-      `${Math.round(this.zoomLevel * 100)}%`,
-      8,
-      21,
-      '600 12px system-ui, sans-serif',
-      '#cbd5e1',
-    );
-  }
-}
-
-class MobileModeNotice extends Entity {
-  private visible = false;
-
-  public setFrame(x: number, y: number, width: number, height: number, visible: boolean): void {
-    this.x = x;
-    this.y = y;
-    this.width = width;
-    this.height = height;
-    this.visible = visible;
-    this.interactive = false;
-  }
-
-  public override getContentProjection(): ContentProjection | null {
-    if (!this.visible) return null;
-    return {
-      text: 'Authoring tools are disabled on narrow screens. Use view, select, pan, and zoom.',
-      font: '500 12px system-ui, sans-serif',
-    };
-  }
-
-  public override isPointInside(): boolean {
-    return false;
-  }
-
-  public override render(_renderer: IRenderer): void {}
-}
-
-class CanvasLabel extends Entity {
-  private visible = false;
-
-  public constructor(
-    id: string,
-    private readonly text: string,
-    private readonly font: string,
-    private readonly color: string,
-  ) {
-    super(id);
-  }
-
-  public setFrame(x: number, y: number, visible: boolean): void {
-    this.x = x;
-    this.y = y;
-    this.width = visible ? Math.max(1, this.text.length * 8) : 0;
-    this.height = visible ? 20 : 0;
-    this.visible = visible;
-    this.interactive = false;
-  }
-
-  public override getContentProjection(): ContentProjection | null {
-    if (!this.visible) return null;
-    return { text: this.text, font: this.font };
-  }
-
-  public override isPointInside(): boolean {
-    return false;
-  }
-
-  public override render(renderer: IRenderer): void {
-    if (this.visible) renderer.fillText(this.text, 0, 0, this.font, this.color);
-  }
-}
-
 /** A compact Figma-style row; all changes remain routed through the controller ports. */
 class LayerRow extends Entity {
   private item: BringsLayerItem | null = null;
@@ -783,9 +639,9 @@ class PropertyToggle extends Entity {
  * later tools reconcile document entities below the `canvasRegion` seam.
  */
 export class EditorShell extends Entity {
-  private readonly toolbar = new EditorRegion('brings-toolbar', {
+  private readonly fileBar = new EditorRegion('brings-file-bar', {
     role: 'toolbar',
-    label: 'Tools',
+    label: 'Document controls',
   });
   private readonly layers = new EditorRegion('brings-layers', {
     role: 'tree',
@@ -800,12 +656,39 @@ export class EditorShell extends Entity {
     role: 'group',
     label: 'Properties',
   });
+  private readonly toolDock = new EditorRegion('brings-tool-dock', {
+    role: 'toolbar',
+    label: 'Creation tools',
+  });
+  private readonly fileBarSurface = new Rect({
+    fill: '#18191e',
+    stroke: '#2d2f36',
+    strokeWidth: 1,
+  }).set({ id: 'brings-file-bar-surface' });
+  private readonly toolDockSurface = new Rect({
+    fill: '#202126',
+    stroke: '#3c3e47',
+    strokeWidth: 1,
+    radius: 13,
+  }).set({ id: 'brings-tool-dock-surface' });
   private readonly mobileModeNotice = new MobileModeNotice('brings-mobile-mode-notice');
   private readonly title = new CanvasLabel(
     'brings-title',
     'Brings',
     '600 18px system-ui, sans-serif',
     '#ecfdf5',
+  );
+  private readonly documentNameLabel = new CanvasLabel(
+    'brings-document-name',
+    'Untitled',
+    '500 12px system-ui, sans-serif',
+    '#f4f4f6',
+  );
+  private readonly localStatusLabel = new CanvasLabel(
+    'brings-local-status',
+    'Saved locally',
+    '500 11px system-ui, sans-serif',
+    '#9b91ff',
   );
   private readonly pagesLabel = new CanvasLabel(
     'brings-pages-label',
@@ -819,11 +702,38 @@ export class EditorShell extends Entity {
     '600 12px system-ui, sans-serif',
     '#e5e7eb',
   );
+  private readonly layersTabIndicator = new Rect({ width: 44, height: 2, fill: '#766bf1' }).set({
+    id: 'brings-layers-tab-indicator',
+  });
+  private readonly activePageLabel = new CanvasLabel(
+    'brings-active-page',
+    'Page 1',
+    '500 12px system-ui, sans-serif',
+    '#c8cad1',
+  );
   private readonly propertiesLabel = new CanvasLabel(
     'brings-properties-label',
     'Design',
     '600 12px system-ui, sans-serif',
     '#e5e7eb',
+  );
+  private readonly positionLabel = new CanvasLabel(
+    'brings-position-label',
+    'Position',
+    '600 11px system-ui, sans-serif',
+    '#aeb2bd',
+  );
+  private readonly appearanceLabel = new CanvasLabel(
+    'brings-appearance-label',
+    'Appearance',
+    '600 11px system-ui, sans-serif',
+    '#aeb2bd',
+  );
+  private readonly propertiesEmptyLabel = new CanvasLabel(
+    'brings-properties-empty',
+    'Select an object to edit properties',
+    '500 11px system-ui, sans-serif',
+    '#7f838e',
   );
   private readonly workspaceLabel = new CanvasLabel(
     'brings-workspace-label',
@@ -837,25 +747,48 @@ export class EditorShell extends Entity {
     '500 12px system-ui, sans-serif',
     '#475569',
   );
-  private readonly selectTool = new ToolbarButton('brings-select-tool', 'Select', () => {
+  private readonly selectTool = new ToolbarButton('brings-select-tool', 'Select', '↖', () => {
     this.activateTool('select');
   });
-  private readonly frameTool = new ToolbarButton('brings-frame-tool', 'Frame', () => {
+  private readonly frameTool = new ToolbarButton('brings-frame-tool', 'Frame', '⌗', () => {
     this.activateTool('frame');
   });
-  private readonly rectangleTool = new ToolbarButton('brings-rectangle-tool', 'Rectangle', () => {
-    this.activateTool('rectangle');
-  });
-  private readonly textTool = new ToolbarButton('brings-text-tool', 'Text', () => {
+  private readonly rectangleTool = new ToolbarButton(
+    'brings-rectangle-tool',
+    'Rectangle',
+    '□',
+    () => {
+      this.activateTool('rectangle');
+    },
+  );
+  private readonly textTool = new ToolbarButton('brings-text-tool', 'Text', 'T', () => {
     this.activateTool('text');
   });
-  private readonly zoomOutTool = new ToolbarButton('brings-zoom-out', 'Zoom out', () => {
+  private readonly zoomOutTool = new ToolbarButton('brings-zoom-out', 'Zoom out', '−', () => {
     this.zoomCamera(1 / 1.2);
   });
-  private readonly zoomInTool = new ToolbarButton('brings-zoom-in', 'Zoom in', () => {
+  private readonly zoomInTool = new ToolbarButton('brings-zoom-in', 'Zoom in', '+', () => {
     this.zoomCamera(1.2);
   });
   private readonly zoomReadout = new ZoomReadout();
+  private readonly undoButton = new ToolbarButton('brings-undo', 'Undo', '↶', () => {
+    this.runHistoryFromChrome('undo');
+  });
+  private readonly redoButton = new ToolbarButton('brings-redo', 'Redo', '↷', () => {
+    this.runHistoryFromChrome('redo');
+  });
+  private readonly toolControls = new Group(
+    this.selectTool,
+    this.frameTool,
+    this.rectangleTool,
+    this.textTool,
+    this.zoomOutTool,
+    this.zoomReadout,
+    this.zoomInTool,
+  ).set({ id: 'brings-tool-controls' });
+  private readonly historyControls = new Group(this.undoButton, this.redoButton).set({
+    id: 'brings-history-controls',
+  });
   private readonly layerRows = new Map<NodeId, LayerRow>();
   private layerSignature = '';
   private readonly nameInput: Input;
@@ -908,38 +841,42 @@ export class EditorShell extends Entity {
       resize: (start, input) => this.ports.proposeResize({ start, input }),
     };
     this.selectionInterpreter = new SelectionGestureInterpreter({
-      commitSelection: (proposal) => this.ports.commitSelection(proposal),
-      commitMove: (input) => this.ports.commitMove(input),
-      commitResize: (proposal) => this.ports.commitResize(proposal),
+      commitSelection: (proposal) => this.refreshAfter(this.ports.commitSelection(proposal)),
+      commitMove: (input) => this.refreshAfter(this.ports.commitMove(input)),
+      commitResize: (proposal) => this.refreshAfter(this.ports.commitResize(proposal)),
       reportInteractionError: (error) => this.ports.reportInteractionError(error),
       markDirty: () => this.scene?.markDirty(),
     });
     this.interactive = true;
-    this.add(this.toolbar);
-    this.add(this.layers);
-    this.add(this.canvasRegion);
-    this.add(this.properties);
-    this.toolbar.add(this.title);
-    this.toolbar.add(this.selectTool);
-    this.toolbar.add(this.frameTool);
-    this.toolbar.add(this.rectangleTool);
-    this.toolbar.add(this.textTool);
-    this.toolbar.add(this.zoomOutTool);
-    this.toolbar.add(this.zoomReadout);
-    this.toolbar.add(this.zoomInTool);
-    this.layers.add(this.pagesLabel);
-    this.layers.add(this.layersLabel);
-    this.canvasRegion.add(this.workspaceLabel);
-    this.canvasRegion.add(this.mobileModeLabel);
-    this.canvasRegion.add(this.mobileModeNotice);
-    this.properties.add(this.propertiesLabel);
-    this.properties.add(this.nameInput);
-    this.properties.add(this.opacityInput);
-    this.properties.add(this.widthInput);
-    this.properties.add(this.heightInput);
-    this.properties.add(this.contentInput);
-    this.properties.add(this.visibleToggle);
-    this.properties.add(this.lockedToggle);
+    this.add(this.fileBar, this.layers, this.canvasRegion, this.properties, this.toolDock);
+    this.fileBar.add(
+      this.fileBarSurface,
+      this.title,
+      this.documentNameLabel,
+      this.localStatusLabel,
+      this.historyControls,
+    );
+    this.layers.add(
+      this.pagesLabel,
+      this.layersLabel,
+      this.layersTabIndicator,
+      this.activePageLabel,
+    );
+    this.canvasRegion.add(this.workspaceLabel, this.mobileModeLabel, this.mobileModeNotice);
+    this.properties.add(
+      this.propertiesLabel,
+      this.positionLabel,
+      this.appearanceLabel,
+      this.propertiesEmptyLabel,
+      this.nameInput,
+      this.opacityInput,
+      this.widthInput,
+      this.heightInput,
+      this.contentInput,
+      this.visibleToggle,
+      this.lockedToggle,
+    );
+    this.toolDock.add(this.toolDockSurface, this.toolControls);
     this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
     this.canvasRegion.on('keyup', (event) => this.routeCameraKeyUp(event));
     this.canvasRegion.on('blur', () => {
@@ -947,6 +884,8 @@ export class EditorShell extends Entity {
     });
     // A panel must participate in hit testing so its interactive row descendants can own events.
     this.layers.setPointerHandler(() => undefined);
+    this.fileBar.setPointerHandler(() => undefined);
+    this.toolDock.setPointerHandler(() => undefined);
     this.layout = resolveEditorLayout(width, height);
     this.camera = createCameraViewport(this.cameraViewportSize());
     this.cameraHasMeasuredViewport = this.hasMeasuredViewport();
@@ -1057,22 +996,18 @@ export class EditorShell extends Entity {
   }
 
   public override render(renderer: IRenderer): void {
+    this.syncDocumentChrome();
     this.syncLayerRows();
     this.syncProperties();
-    const { toolbarHeight, viewport } = this.layout;
-    const toolbarHeightInScene = Math.min(toolbarHeight, this.height);
+    const { viewport } = this.layout;
 
     renderer.beginPath();
     renderer.roundRect(0, 0, this.width, this.height, 0);
-    renderer.fill('#f8f9fc');
-
-    renderer.beginPath();
-    renderer.roundRect(0, 0, this.width, toolbarHeightInScene, 0);
-    renderer.fill('#20242b');
+    renderer.fill('#b8bbc1');
 
     renderer.beginPath();
     renderer.roundRect(viewport.x, viewport.y, viewport.width, viewport.height, 0);
-    renderer.fill('#f4f6fa');
+    renderer.fill('#b8bbc1');
     this.renderDocument(renderer, viewport.x, viewport.y);
 
     this.renderPanel(renderer, this.layers);
@@ -1080,23 +1015,34 @@ export class EditorShell extends Entity {
   }
 
   private applyLayout(): void {
-    const { toolbarHeight, leftPanel, rightPanel, viewport } = this.layout;
-    const contentHeight = Math.max(0, this.height - toolbarHeight);
+    const { fileBarHeight, leftPanel, rightPanel, viewport, toolDock } = this.layout;
+    const contentHeight = Math.max(0, this.height - fileBarHeight);
     const leftWidth = Math.min(leftPanel.width, this.width);
     const rightWidth = Math.min(rightPanel.width, this.width);
     const leftOpen = leftPanel.mode === 'visible' || this.activeDrawer === 'left';
     const rightOpen = rightPanel.mode === 'visible' || this.activeDrawer === 'right';
+    const snapshot = this.ports.documentSnapshot();
+    this.syncDocumentChrome(snapshot);
 
-    this.toolbar.setFrame(0, 0, this.width, Math.min(toolbarHeight, this.height), true);
-    this.layers.setFrame(0, toolbarHeight, leftWidth, contentHeight, leftOpen);
+    this.fileBar.setFrame(0, 0, this.width, Math.min(fileBarHeight, this.height), true);
+    this.fileBarSurface.set({ width: this.fileBar.width, height: this.fileBar.height });
+    this.layers.setFrame(0, fileBarHeight, leftWidth, contentHeight, leftOpen);
     this.canvasRegion.setFrame(viewport.x, viewport.y, viewport.width, viewport.height, true);
     this.properties.setFrame(
       Math.max(0, this.width - rightWidth),
-      toolbarHeight,
+      fileBarHeight,
       rightWidth,
       contentHeight,
       rightOpen,
     );
+    this.toolDock.setFrame(
+      toolDock.x,
+      toolDock.y,
+      toolDock.width,
+      toolDock.height,
+      toolDock.width > 0,
+    );
+    this.toolDockSurface.set({ width: toolDock.width, height: toolDock.height });
     this.mobileModeNotice.setFrame(
       28,
       100,
@@ -1105,17 +1051,32 @@ export class EditorShell extends Entity {
       !this.authoringEnabled,
     );
     this.title.setFrame(20, 28, true);
-    this.selectTool.setFrame(120, 12, this.activeTool === 'select');
-    this.frameTool.setFrame(216, 12, this.activeTool === 'frame');
-    this.rectangleTool.setFrame(312, 12, this.activeTool === 'rectangle');
-    this.textTool.setFrame(408, 12, this.activeTool === 'text');
-    const showZoomReadout = this.width >= 780;
-    const zoomClusterStart = Math.max(504, this.width - (showZoomReadout ? 276 : 196));
-    this.zoomOutTool.setFrame(zoomClusterStart, 12, false);
-    this.zoomReadout.setFrame(zoomClusterStart + 96, 12, showZoomReadout, this.camera.state.zoom);
-    this.zoomInTool.setFrame(zoomClusterStart + (showZoomReadout ? 176 : 96), 12, false);
-    this.pagesLabel.setFrame(20, 30, this.layers.interactive);
-    this.layersLabel.setFrame(20, 72, this.layers.interactive);
+    this.documentNameLabel.setFrame(120, 28, this.width >= 360);
+    this.localStatusLabel.setFrame(240, 28, this.width >= 520);
+    this.historyControls.set({ x: Math.max(0, this.width - 92), y: 6 });
+    this.undoButton.setFrame(0, 0, 36, false, this.width >= 320, snapshot.undoDepth > 0);
+    this.redoButton.setFrame(44, 0, 36, false, this.width >= 320, snapshot.redoDepth > 0);
+
+    const authoring = toolDock.mode === 'authoring';
+    this.toolControls.set({ x: 8, y: 6 });
+    this.selectTool.setFrame(0, 0, 36, this.activeTool === 'select');
+    this.frameTool.setFrame(44, 0, 36, this.activeTool === 'frame', authoring);
+    this.rectangleTool.setFrame(88, 0, 36, this.activeTool === 'rectangle', authoring);
+    this.textTool.setFrame(132, 0, 36, this.activeTool === 'text', authoring);
+    const zoomStart = authoring ? 204 : 44;
+    this.zoomOutTool.setFrame(zoomStart, 0, 36, false);
+    this.zoomReadout.setFrame(zoomStart + 40, 0, true, this.camera.state.zoom);
+    this.zoomInTool.setFrame(zoomStart + 116, 0, 36, false);
+
+    this.pagesLabel.setFrame(20, 27, this.layers.interactive);
+    this.layersLabel.setFrame(84, 27, this.layers.interactive);
+    this.layersTabIndicator.set({
+      x: 82,
+      y: 48,
+      width: this.layers.interactive ? 48 : 0,
+      height: this.layers.interactive ? 2 : 0,
+    });
+    this.activePageLabel.setFrame(20, 70, this.layers.interactive);
     this.propertiesLabel.setFrame(20, 30, this.properties.interactive);
     this.workspaceLabel.setFrame(28, 40, true);
     this.mobileModeLabel.setFrame(28, 70, !this.authoringEnabled);
@@ -1124,6 +1085,16 @@ export class EditorShell extends Entity {
     if (!rightOpen) this.properties.setFrame(0, 0, 0, 0, false);
     this.layoutLayerRows();
     this.layoutProperties();
+  }
+
+  private syncDocumentChrome(snapshot = this.ports.documentSnapshot()): void {
+    const activePage = snapshot.document.pages.find(
+      (page) => page.id === snapshot.document.activePageId,
+    );
+    this.documentNameLabel.setText(snapshot.document.name);
+    this.activePageLabel.setText(activePage?.name ?? 'No active page');
+    this.undoButton.setEnabled(snapshot.undoDepth > 0);
+    this.redoButton.setEnabled(snapshot.redoDepth > 0);
   }
 
   private syncLayerRows(): void {
@@ -1149,7 +1120,7 @@ export class EditorShell extends Entity {
           `brings-layer-${item.id}`,
           (nodeId) => this.ports.selectLayer([nodeId], nodeId),
           (nodeId) => this.ports.setLayerVisibility(nodeId),
-          () => this.scene?.markDirty(),
+          () => this.refreshDocumentState(),
         );
         this.layerRows.set(item.id, row);
         this.layers.add(row);
@@ -1165,7 +1136,7 @@ export class EditorShell extends Entity {
       row.setLayer(
         item,
         12 + item.depth * 16,
-        88 + index * 28,
+        96 + index * 28,
         this.layers.width - 24 - item.depth * 16,
       );
     }
@@ -1243,17 +1214,25 @@ export class EditorShell extends Entity {
       input.interactive = show;
       input.opacity = show ? 1 : 0;
     };
-    setInput(this.nameInput, 58);
-    setInput(this.opacityInput, 94);
-    setInput(this.widthInput, 130, visible && this.widthInput.value !== '');
-    setInput(this.heightInput, 166, visible && this.heightInput.value !== '');
-    setInput(this.contentInput, 202, visible && this.contentInput.value !== '');
+    this.positionLabel.setFrame(20, 92, visible);
+    this.appearanceLabel.setFrame(20, 202, visible);
+    this.propertiesEmptyLabel.setFrame(
+      20,
+      62,
+      this.properties.interactive && this.propertySignature === '',
+      width,
+    );
+    setInput(this.nameInput, 50);
+    setInput(this.widthInput, 106, visible && this.widthInput.value !== '');
+    setInput(this.heightInput, 142, visible && this.heightInput.value !== '');
+    setInput(this.opacityInput, 216);
+    setInput(this.contentInput, 300, visible && this.contentInput.value !== '');
     this.visibleToggle.x = 20;
-    this.visibleToggle.y = 244;
+    this.visibleToggle.y = 258;
     this.visibleToggle.interactive = visible;
     this.visibleToggle.opacity = visible ? 1 : 0;
     this.lockedToggle.x = 120;
-    this.lockedToggle.y = 244;
+    this.lockedToggle.y = 258;
     this.lockedToggle.interactive = visible;
     this.lockedToggle.opacity = visible ? 1 : 0;
   }
@@ -1277,6 +1256,13 @@ export class EditorShell extends Entity {
     this.visibleToggle.checked = node?.visible ?? false;
     this.lockedToggle.checked = node?.locked ?? false;
     this.layoutProperties();
+  }
+
+  private renderPanel(renderer: IRenderer, panel: EditorRegion): void {
+    if (!panel.interactive) return;
+    renderer.beginPath();
+    renderer.roundRect(panel.x, panel.y, panel.width, panel.height, 0);
+    renderer.fill('#1d1f24');
   }
 
   private commitPropertyInput(input: Input): void {
@@ -1306,16 +1292,8 @@ export class EditorShell extends Entity {
     if (snapshot.selection.nodeIds.length === 0) return;
     const result = this.ports.setSelectionProperties(patch);
     if (result.ok) {
-      this.propertySignature = '';
-      this.scene?.markDirty();
+      this.refreshDocumentState();
     }
-  }
-
-  private renderPanel(renderer: IRenderer, panel: EditorRegion): void {
-    if (!panel.interactive) return;
-    renderer.beginPath();
-    renderer.roundRect(panel.x, panel.y, panel.width, panel.height, 0);
-    renderer.fill('#2b3038');
   }
 
   private renderDocument(renderer: IRenderer, originX: number, originY: number): void {
@@ -1758,7 +1736,7 @@ export class EditorShell extends Entity {
         sampled.value.pagePoint.x,
         sampled.value.pagePoint.y,
       );
-      if (result.ok) this.scene?.markDirty();
+      if (result.ok) this.refreshDocumentState();
       return;
     }
 
@@ -2053,6 +2031,28 @@ export class EditorShell extends Entity {
     this.scene?.markDirty();
   }
 
+  private runHistoryFromChrome(action: 'undo' | 'redo'): void {
+    const result = this.ports.runHistory(action);
+    if (!result.ok) return;
+    this.refreshDocumentState();
+  }
+
+  private refreshAfter(result: Result<EditorSnapshot>): Result<EditorSnapshot> {
+    // SelectionGestureInterpreter owns the corresponding dirty notification.
+    if (result.ok) this.refreshDocumentState(false);
+    return result;
+  }
+
+  private refreshDocumentState(markDirty = true): void {
+    this.layerSignature = '';
+    this.propertySignature = '';
+    this.syncDocumentChrome();
+    this.syncLayerRows();
+    this.syncProperties();
+    this.applyLayout();
+    if (markDirty) this.scene?.markDirty();
+  }
+
   private cameraViewportSize(): Readonly<{ width: number; height: number }> {
     return Object.freeze({
       width: Math.max(1, this.layout.viewport.width),
@@ -2222,7 +2222,7 @@ export class EditorShell extends Entity {
           : action === 'ungroup'
             ? this.ports.ungroupSelection()
             : this.ports.runHistory(action);
-    if (result.ok) this.scene?.markDirty();
+    if (result.ok) this.refreshDocumentState();
   }
 
   private routeCameraKeyUp(event: VectoJSEvent): void {
