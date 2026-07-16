@@ -21,7 +21,8 @@ import type {
   SelectionResizeProposal,
 } from '@vectojs/brings-core';
 import type { BringsLayerItem } from '../editor/BringsEditorController';
-import { viewportPoint, viewportToPagePoint, type PageDelta } from '../editor/selectionCoordinates';
+import { editorPagePoint, viewportPoint, type PageDelta } from '../editor/selectionCoordinates';
+import { createCameraViewport, normalizeWheelDelta } from './CameraViewport';
 import type {
   ResizeInteractionProposal,
   ResizeInteractionStart,
@@ -549,6 +550,44 @@ class ToolbarButton extends Entity {
   }
 }
 
+class ZoomReadout extends Entity {
+  private visible = false;
+  private zoomLevel = 1;
+
+  public constructor() {
+    super('brings-zoom-readout');
+    this.interactive = false;
+  }
+
+  public setFrame(x: number, y: number, visible: boolean, zoom: number): void {
+    this.x = x;
+    this.y = y;
+    this.width = visible ? 72 : 0;
+    this.height = visible ? 32 : 0;
+    this.visible = visible;
+    this.zoomLevel = zoom;
+  }
+
+  public override getA11yAttributes(): A11yAttributes {
+    return { role: 'status', label: `Zoom ${Math.round(this.zoomLevel * 100)}%` };
+  }
+
+  public override isPointInside(): boolean {
+    return false;
+  }
+
+  public override render(renderer: IRenderer): void {
+    if (!this.visible) return;
+    renderer.fillText(
+      `${Math.round(this.zoomLevel * 100)}%`,
+      8,
+      21,
+      '600 12px system-ui, sans-serif',
+      '#cbd5e1',
+    );
+  }
+}
+
 class MobileModeNotice extends Entity {
   private visible = false;
 
@@ -810,6 +849,13 @@ export class EditorShell extends Entity {
   private readonly textTool = new ToolbarButton('brings-text-tool', 'Text', () => {
     this.activateTool('text');
   });
+  private readonly zoomOutTool = new ToolbarButton('brings-zoom-out', 'Zoom out', () => {
+    this.zoomCamera(1 / 1.2);
+  });
+  private readonly zoomInTool = new ToolbarButton('brings-zoom-in', 'Zoom in', () => {
+    this.zoomCamera(1.2);
+  });
+  private readonly zoomReadout = new ZoomReadout();
   private readonly layerRows = new Map<NodeId, LayerRow>();
   private layerSignature = '';
   private readonly nameInput: Input;
@@ -837,6 +883,11 @@ export class EditorShell extends Entity {
   private readonly selectionProvider: SelectionProposalProvider;
   private readonly resizeProvider: ResizeProposalProvider;
   private readonly selectionInterpreter: SelectionGestureInterpreter;
+  private camera = createCameraViewport({ width: 1, height: 1 });
+  private cameraHasMeasuredViewport = false;
+  private cameraPointerId: number | null = null;
+  private cameraLastViewportPoint: Readonly<{ x: number; y: number }> | null = null;
+  private spacePanHeld = false;
 
   public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
     super('brings-editor-shell');
@@ -873,6 +924,9 @@ export class EditorShell extends Entity {
     this.toolbar.add(this.frameTool);
     this.toolbar.add(this.rectangleTool);
     this.toolbar.add(this.textTool);
+    this.toolbar.add(this.zoomOutTool);
+    this.toolbar.add(this.zoomReadout);
+    this.toolbar.add(this.zoomInTool);
     this.layers.add(this.pagesLabel);
     this.layers.add(this.layersLabel);
     this.canvasRegion.add(this.workspaceLabel);
@@ -887,10 +941,17 @@ export class EditorShell extends Entity {
     this.properties.add(this.visibleToggle);
     this.properties.add(this.lockedToggle);
     this.canvasRegion.on('keydown', (event) => this.routeEditorShortcut(event));
+    this.canvasRegion.on('keyup', (event) => this.routeCameraKeyUp(event));
+    this.canvasRegion.on('blur', () => {
+      this.spacePanHeld = false;
+    });
     // A panel must participate in hit testing so its interactive row descendants can own events.
     this.layers.setPointerHandler(() => undefined);
     this.layout = resolveEditorLayout(width, height);
+    this.camera = createCameraViewport(this.cameraViewportSize());
+    this.cameraHasMeasuredViewport = this.hasMeasuredViewport();
     this.canvasRegion.setPointerHandler((event) => this.routeCanvasPointer(event));
+    this.canvasRegion.on('wheel', (event) => this.routeCanvasWheel(event));
     this.resize(width, height);
     this.syncLayerRows();
     this.syncProperties();
@@ -934,6 +995,14 @@ export class EditorShell extends Entity {
     });
   }
 
+  /** Read detached camera state for debugging and deterministic browser verification. */
+  public cameraSnapshot(): Readonly<{ center: Readonly<{ x: number; y: number }>; zoom: number }> {
+    return Object.freeze({
+      center: Object.freeze({ x: this.camera.state.center.x, y: this.camera.state.center.y }),
+      zoom: this.camera.state.zoom,
+    });
+  }
+
   public openDrawer(side: DrawerSide): boolean {
     const panel = side === 'left' ? this.layout.leftPanel : this.layout.rightPanel;
     if (panel.mode !== 'drawer') return false;
@@ -964,6 +1033,11 @@ export class EditorShell extends Entity {
     this.width = width;
     this.height = height;
     this.layout = resolveEditorLayout(width, height);
+    this.camera = createCameraViewport(
+      this.cameraViewportSize(),
+      this.cameraHasMeasuredViewport ? this.camera.state : undefined,
+    );
+    this.cameraHasMeasuredViewport ||= this.hasMeasuredViewport();
 
     if (this.activeDrawer) {
       const activePanel =
@@ -1035,6 +1109,11 @@ export class EditorShell extends Entity {
     this.frameTool.setFrame(216, 12, this.activeTool === 'frame');
     this.rectangleTool.setFrame(312, 12, this.activeTool === 'rectangle');
     this.textTool.setFrame(408, 12, this.activeTool === 'text');
+    const showZoomReadout = this.width >= 780;
+    const zoomClusterStart = Math.max(504, this.width - (showZoomReadout ? 276 : 196));
+    this.zoomOutTool.setFrame(zoomClusterStart, 12, false);
+    this.zoomReadout.setFrame(zoomClusterStart + 96, 12, showZoomReadout, this.camera.state.zoom);
+    this.zoomInTool.setFrame(zoomClusterStart + (showZoomReadout ? 176 : 96), 12, false);
     this.pagesLabel.setFrame(20, 30, this.layers.interactive);
     this.layersLabel.setFrame(20, 72, this.layers.interactive);
     this.propertiesLabel.setFrame(20, 30, this.properties.interactive);
@@ -1377,13 +1456,19 @@ export class EditorShell extends Entity {
     const activePage = document.pages.find((page) => page.id === document.activePageId);
     if (activePage === undefined) return;
     renderer.save();
-    renderer.translate(originX, originY);
+    const cameraOrigin = this.camera.viewportPointAt({ x: 0, y: 0 });
+    renderer.translate(originX + cameraOrigin.x, originY + cameraOrigin.y);
+    renderer.scale(this.camera.state.zoom, this.camera.state.zoom);
     for (const rootId of activePage.rootNodeIds) {
       const root = nodes.get(rootId);
       if (root !== undefined) renderNode(root, IDENTITY_MATRIX, 1, false, false);
     }
-    this.renderAlignmentGuides(renderer, visual?.guides ?? []);
-    this.renderResizeOverlay(renderer, visual);
+    // Selection affordances follow the camera position but retain screen-space
+    // stroke and handle dimensions, matching the editor convention used by Figma.
+    renderer.save();
+    renderer.scale(1 / this.camera.state.zoom, 1 / this.camera.state.zoom);
+    this.renderAlignmentGuides(renderer, visual?.guides ?? [], this.camera.state.zoom);
+    this.renderResizeOverlay(renderer, visual, this.camera.state.zoom);
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
       const source = visual.marquee;
       const x = Math.min(source.x, source.x + source.width);
@@ -1393,15 +1478,26 @@ export class EditorShell extends Entity {
       renderer.save();
       renderer.setGlobalAlpha(1);
       renderer.beginPath();
-      renderer.roundRect(x, y, width, height, 0);
+      renderer.roundRect(
+        x * this.camera.state.zoom,
+        y * this.camera.state.zoom,
+        width * this.camera.state.zoom,
+        height * this.camera.state.zoom,
+        0,
+      );
       renderer.fill('rgba(37, 99, 235, 0.12)');
       renderer.stroke('#2563eb', 1);
       renderer.restore();
     }
     renderer.restore();
+    renderer.restore();
   }
 
-  private renderAlignmentGuides(renderer: IRenderer, guides: readonly AlignmentGuide[]): void {
+  private renderAlignmentGuides(
+    renderer: IRenderer,
+    guides: readonly AlignmentGuide[],
+    zoom: number,
+  ): void {
     renderer.save();
     renderer.setGlobalAlpha(1);
     for (const guide of guides) {
@@ -1415,18 +1511,22 @@ export class EditorShell extends Entity {
       }
       renderer.beginPath();
       if (guide.axis === 'x') {
-        renderer.moveTo(guide.coordinate, guide.minExtent);
-        renderer.lineTo(guide.coordinate, guide.maxExtent);
+        renderer.moveTo(guide.coordinate * zoom, guide.minExtent * zoom);
+        renderer.lineTo(guide.coordinate * zoom, guide.maxExtent * zoom);
       } else {
-        renderer.moveTo(guide.minExtent, guide.coordinate);
-        renderer.lineTo(guide.maxExtent, guide.coordinate);
+        renderer.moveTo(guide.minExtent * zoom, guide.coordinate * zoom);
+        renderer.lineTo(guide.maxExtent * zoom, guide.coordinate * zoom);
       }
       renderer.stroke('#2563eb', 1);
     }
     renderer.restore();
   }
 
-  private renderResizeOverlay(renderer: IRenderer, visual: SelectionGestureVisual | null): void {
+  private renderResizeOverlay(
+    renderer: IRenderer,
+    visual: SelectionGestureVisual | null,
+    zoom: number,
+  ): void {
     if (!this.authoringEnabled || this.activeTool !== 'select' || this.selectionSession !== null) {
       return;
     }
@@ -1452,11 +1552,17 @@ export class EditorShell extends Entity {
     renderer.save();
     renderer.setGlobalAlpha(1);
     renderer.beginPath();
-    renderer.roundRect(bounds.minX, bounds.minY, width, height, 0);
+    renderer.roundRect(bounds.minX * zoom, bounds.minY * zoom, width * zoom, height * zoom, 0);
     renderer.stroke('#2563eb', 1);
     for (const handle of overlay.handles) {
       renderer.beginPath();
-      renderer.roundRect(handle.x, handle.y, handle.width, handle.height, 0);
+      renderer.roundRect(
+        (handle.x + handle.width / 2) * zoom - handle.width / 2,
+        (handle.y + handle.height / 2) * zoom - handle.height / 2,
+        handle.width,
+        handle.height,
+        0,
+      );
       renderer.fill('#ffffff');
       renderer.stroke('#2563eb', 1);
     }
@@ -1480,12 +1586,21 @@ export class EditorShell extends Entity {
     }
 
     const activePointerId = this.resizePointerId ?? this.selectionPointerId;
+    if (this.cameraPointerId !== null && this.cameraPointerId !== pointerId) {
+      if (event.type === 'pointerdown') this.quarantinedPointerIds.add(pointerId);
+      return;
+    }
     if (activePointerId !== null && activePointerId !== pointerId) {
       if (event.type === 'pointerdown') this.quarantinedPointerIds.add(pointerId);
       return;
     }
 
     if (event.type === 'pointercancel') {
+      if (this.cameraPointerId === pointerId) {
+        this.closeCameraPointer();
+        event.preventDefault();
+        return;
+      }
       const resizeSession = this.resizeSession;
       if (resizeSession !== null && this.resizePointerId === pointerId) {
         const effect = resizeSession.cancel({ kind: 'pointercancel', pointerId });
@@ -1514,6 +1629,10 @@ export class EditorShell extends Entity {
 
     if (event.type === 'pointerdown') {
       this.routeCanvasPointerDown(event, native, routeVersion);
+      return;
+    }
+    if (this.cameraPointerId === pointerId) {
+      this.routeCameraPointer(event);
       return;
     }
     const resizeSession = this.resizeSession;
@@ -1600,8 +1719,19 @@ export class EditorShell extends Entity {
     }>,
     routeVersion: number,
   ): void {
-    if (!this.authoringEnabled) return;
     const pointerId = native.pointerId;
+    if (native.button === 1 || (native.button === 0 && this.spacePanHeld)) {
+      const viewport = this.viewportSample(event);
+      if (!viewport.ok) {
+        this.rejectPointer(pointerId, viewport.error);
+        return;
+      }
+      this.cameraPointerId = pointerId;
+      this.cameraLastViewportPoint = viewport.value;
+      event.preventDefault();
+      return;
+    }
+    if (!this.authoringEnabled) return;
     const activePointerId = this.resizePointerId ?? this.selectionPointerId;
     if (activePointerId !== null) {
       if (activePointerId !== pointerId) this.quarantinedPointerIds.add(pointerId);
@@ -1863,11 +1993,10 @@ export class EditorShell extends Entity {
     event: VectoJSEvent,
     native: Readonly<{ pointerId: number; shiftKey: boolean }>,
   ): Result<SelectionPointerSample> {
-    const localX = event.localX;
-    const localY = event.localY;
-    const viewport = viewportPoint(localX ?? Number.NaN, localY ?? Number.NaN);
+    const viewport = this.viewportSample(event);
     if (!viewport.ok) return viewport;
-    const page = viewportToPagePoint(viewport.value);
+    const converted = this.camera.pagePointAt(viewport.value);
+    const page = editorPagePoint(converted.x, converted.y);
     if (!page.ok) return page;
     return {
       ok: true,
@@ -1878,6 +2007,94 @@ export class EditorShell extends Entity {
         shiftKey: native.shiftKey,
       },
     };
+  }
+
+  private viewportSample(
+    event: VectoJSEvent,
+  ): Result<import('../editor/selectionCoordinates').ViewportPoint> {
+    return viewportPoint(event.localX ?? Number.NaN, event.localY ?? Number.NaN);
+  }
+
+  private routeCameraPointer(event: VectoJSEvent): void {
+    const viewport = this.viewportSample(event);
+    if (!viewport.ok) {
+      if (this.cameraPointerId !== null) this.rejectPointer(this.cameraPointerId, viewport.error);
+      this.closeCameraPointer();
+      return;
+    }
+    if (event.type === 'pointermove' && this.cameraLastViewportPoint !== null) {
+      this.camera = this.camera.panBySceneDelta({
+        x: viewport.value.x - this.cameraLastViewportPoint.x,
+        y: viewport.value.y - this.cameraLastViewportPoint.y,
+      });
+      this.cameraLastViewportPoint = viewport.value;
+      this.scene?.markDirty();
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointerup') {
+      this.closeCameraPointer();
+      event.preventDefault();
+    }
+  }
+
+  private closeCameraPointer(): void {
+    this.cameraPointerId = null;
+    this.cameraLastViewportPoint = null;
+  }
+
+  private zoomCamera(factor: number): void {
+    const center = Object.freeze({
+      x: this.layout.viewport.width / 2,
+      y: this.layout.viewport.height / 2,
+    });
+    this.camera = this.camera.zoomByFactorAtViewportPoint(center, factor);
+    this.applyLayout();
+    this.scene?.markDirty();
+  }
+
+  private cameraViewportSize(): Readonly<{ width: number; height: number }> {
+    return Object.freeze({
+      width: Math.max(1, this.layout.viewport.width),
+      height: Math.max(1, this.layout.viewport.height),
+    });
+  }
+
+  private hasMeasuredViewport(): boolean {
+    return this.layout.viewport.width > 0 && this.layout.viewport.height > 0;
+  }
+
+  private routeCanvasWheel(event: VectoJSEvent): void {
+    const native = event.nativeEvent as
+      | Readonly<{
+          deltaX?: number;
+          deltaY?: number;
+          deltaMode?: number;
+          shiftKey?: boolean;
+          ctrlKey?: boolean;
+          metaKey?: boolean;
+        }>
+      | undefined;
+    const viewport = this.viewportSample(event);
+    if (!viewport.ok || native === undefined) return;
+    const deltaX = native.deltaX ?? Number.NaN;
+    const deltaY = native.deltaY ?? Number.NaN;
+    const deltaMode = native.deltaMode ?? 0;
+    try {
+      const delta = normalizeWheelDelta(
+        { deltaX, deltaY, deltaMode, shiftKey: native.shiftKey },
+        this.layout.viewport,
+      );
+      this.camera =
+        native.ctrlKey === true || native.metaKey === true
+          ? this.camera.zoomAtViewportPoint(viewport.value, delta.y)
+          : this.camera.panBySceneDelta({ x: -delta.x, y: -delta.y });
+      this.applyLayout();
+      this.scene?.markDirty();
+      event.preventDefault();
+    } catch {
+      this.ports.reportInteractionError({ code: 'interaction.coordinate-invalid', path: '/wheel' });
+    }
   }
 
   private resizeSample(
@@ -1958,6 +2175,18 @@ export class EditorShell extends Entity {
   }
 
   private routeEditorShortcut(event: VectoJSEvent): void {
+    if (
+      event.key === ' ' &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      !this.shouldYieldNativeEditor(event)
+    ) {
+      this.spacePanHeld = true;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Escape' && this.resizeSession !== null) {
       const session = this.resizeSession;
       const pointerId = this.resizePointerId;
@@ -1994,6 +2223,13 @@ export class EditorShell extends Entity {
             ? this.ports.ungroupSelection()
             : this.ports.runHistory(action);
     if (result.ok) this.scene?.markDirty();
+  }
+
+  private routeCameraKeyUp(event: VectoJSEvent): void {
+    if (event.key !== ' ' || this.shouldYieldNativeEditor(event)) return;
+    this.spacePanHeld = false;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   private shouldYieldNativeEditor(event: VectoJSEvent): boolean {

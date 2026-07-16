@@ -248,6 +248,7 @@ function dispatchPointer(
   }>,
 ): VectoJSEvent {
   const canvas = childById(shell, 'brings-canvas-region');
+  let prevented = false;
   const event = new VectoJSEvent(
     type,
     canvas,
@@ -258,6 +259,51 @@ function dispatchPointer(
       altKey: input.altKey ?? false,
       ctrlKey: input.ctrlKey ?? false,
       metaKey: input.metaKey ?? false,
+      get defaultPrevented() {
+        return prevented;
+      },
+      preventDefault() {
+        prevented = true;
+      },
+    },
+    true,
+    { x: canvas.x + input.x, y: canvas.y + input.y },
+  );
+  canvas.dispatchEvent(event);
+  return event;
+}
+
+function dispatchWheel(
+  shell: EditorShell,
+  input: Readonly<{
+    x: number;
+    y: number;
+    deltaX: number;
+    deltaY: number;
+    deltaMode?: number;
+    shiftKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+  }>,
+): VectoJSEvent {
+  const canvas = childById(shell, 'brings-canvas-region');
+  let prevented = false;
+  const event = new VectoJSEvent(
+    'wheel',
+    canvas,
+    {
+      deltaX: input.deltaX,
+      deltaY: input.deltaY,
+      deltaMode: input.deltaMode ?? 0,
+      shiftKey: input.shiftKey ?? false,
+      ctrlKey: input.ctrlKey ?? false,
+      metaKey: input.metaKey ?? false,
+      get defaultPrevented() {
+        return prevented;
+      },
+      preventDefault() {
+        prevented = true;
+      },
     },
     true,
     { x: canvas.x + input.x, y: canvas.y + input.y },
@@ -359,6 +405,159 @@ test('projects the named Brings application and primary editor regions', () => {
     { role: 'region', label: 'Design canvas', tabIndex: 0 },
     { role: 'group', label: 'Properties' },
   ]);
+});
+
+test('constructs safely before the host has measurable viewport dimensions', () => {
+  const shell = new EditorShell();
+
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 0.5, y: 0.5 }, zoom: 1 });
+  shell.resize(1440, 900);
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 456, y: 426 }, zoom: 1 });
+});
+
+test('keeps document selection in page space while camera gestures stay ephemeral', () => {
+  const selection = selectionPorts({ ownerId: first });
+  const shell = new EditorShell(1440, 900, selection.ports);
+
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 456, y: 426 }, zoom: 1 });
+  const zoom = dispatchWheel(shell, {
+    x: 300,
+    y: 220,
+    deltaX: 0,
+    deltaY: -100,
+    ctrlKey: true,
+  });
+  expect(zoom.defaultPrevented).toBe(true);
+  expect(shell.cameraSnapshot().zoom).toBeGreaterThan(1);
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 91, x: 300, y: 220, button: 1 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 91, x: 320, y: 210, button: 1 });
+  const panEnd = dispatchPointer(shell, 'pointerup', {
+    pointerId: 91,
+    x: 320,
+    y: 210,
+    button: 1,
+  });
+  expect(panEnd.defaultPrevented).toBe(true);
+  expect(selection.pointCalls).toEqual([]);
+
+  const camera = shell.cameraSnapshot();
+  dispatchPointer(shell, 'pointerdown', { pointerId: 92, x: 300, y: 220 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 92, x: 300, y: 220 });
+  expect(selection.pointCalls).toHaveLength(1);
+  expect(selection.pointCalls[0]?.point).toMatchObject({
+    x: camera.center.x + (300 - 456) / camera.zoom,
+    y: camera.center.y + (220 - 426) / camera.zoom,
+  });
+});
+
+test('consumes wheel pan and Shift-wheel pan without creating a document interaction', () => {
+  const selection = selectionPorts({ ownerId: first });
+  const shell = new EditorShell(1440, 900, selection.ports);
+
+  const pan = dispatchWheel(shell, { x: 300, y: 220, deltaX: 10, deltaY: 20 });
+  const shiftPan = dispatchWheel(shell, { x: 300, y: 220, deltaX: 0, deltaY: 15, shiftKey: true });
+
+  expect(pan.defaultPrevented).toBe(true);
+  expect(shiftPan.defaultPrevented).toBe(true);
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 481, y: 446 }, zoom: 1 });
+  expect(selection.pointCalls).toEqual([]);
+  expect(shell.interactionSnapshot()).toMatchObject({ phase: 'idle' });
+});
+
+test('uses Space drag for a transient camera pan without starting a document gesture', () => {
+  const selection = selectionPorts({ ownerId: first });
+  const shell = new EditorShell(1440, 900, selection.ports);
+  const canvas = childById(shell, 'brings-canvas-region');
+  let keyDownPrevented = false;
+  const keyDown = new VectoJSEvent('keydown', canvas, {
+    key: ' ',
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => {
+      keyDownPrevented = true;
+    },
+  });
+  canvas.dispatchEvent(keyDown);
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 93, x: 300, y: 220 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 93, x: 324, y: 205 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 93, x: 324, y: 205 });
+
+  expect(keyDownPrevented).toBe(true);
+  expect(keyDown.propagationStopped).toBe(true);
+  expect(selection.pointCalls).toEqual([]);
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 432, y: 441 }, zoom: 1 });
+
+  const keyUp = new VectoJSEvent('keyup', canvas, {
+    key: ' ',
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => undefined,
+  });
+  canvas.dispatchEvent(keyUp);
+  dispatchPointer(shell, 'pointerdown', { pointerId: 94, x: 300, y: 220 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 94, x: 300, y: 220 });
+  expect(selection.pointCalls).toHaveLength(1);
+});
+
+test('exposes center-anchored zoom toolbar controls without changing the active tool', () => {
+  const shell = new EditorShell(1440, 900);
+  const zoomIn = childById(shell, 'brings-zoom-in');
+  const zoomOut = childById(shell, 'brings-zoom-out');
+
+  zoomIn.dispatchEvent(
+    new VectoJSEvent('pointerdown', zoomIn, { preventDefault: () => undefined }),
+  );
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 456, y: 426 }, zoom: 1.2 });
+  expect(zoomIn.getA11yAttributes()).toEqual({ role: 'button', label: 'Zoom in' });
+  expect(childById(shell, 'brings-zoom-readout').getA11yAttributes()).toEqual({
+    role: 'status',
+    label: 'Zoom 120%',
+  });
+
+  zoomOut.dispatchEvent(
+    new VectoJSEvent('pointerdown', zoomOut, { preventDefault: () => undefined }),
+  );
+  expect(shell.cameraSnapshot()).toEqual({ center: { x: 456, y: 426 }, zoom: 1 });
+  expect(childById(shell, 'brings-select-tool').getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Select tool selected',
+  });
+});
+
+test('keeps text and zoom controls disjoint across compact desktop toolbar layouts', () => {
+  const shell = new EditorShell(700, 600);
+  const text = childById(shell, 'brings-text-tool');
+  const zoomOut = childById(shell, 'brings-zoom-out');
+  const zoomReadout = childById(shell, 'brings-zoom-readout');
+  const zoomIn = childById(shell, 'brings-zoom-in');
+
+  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomIn.x);
+  expect(zoomReadout.width).toBe(0);
+
+  shell.resize(780, 600);
+  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
+  expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
+  expect(zoomIn.x + zoomIn.width).toBeLessThanOrEqual(shell.width);
+});
+
+test('keeps resize handles at eight screen pixels after camera zoom', () => {
+  const state = resizePorts();
+  const shell = new EditorShell(1440, 900, state.ports);
+  const zoomIn = childById(shell, 'brings-zoom-in');
+  zoomIn.dispatchEvent(
+    new VectoJSEvent('pointerdown', zoomIn, { preventDefault: () => undefined }),
+  );
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(
+    recording.paintedRects.some(
+      ({ matrix, args }) => matrix[0] === 1 && matrix[3] === 1 && args[2] === 8 && args[3] === 8,
+    ),
+  ).toBe(true);
 });
 
 test('renders ordered interactive layer rows from the Core snapshot', () => {

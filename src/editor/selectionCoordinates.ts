@@ -53,13 +53,16 @@ export function viewportPoint(x: number, y: number): Result<ViewportPoint> {
   return success(Object.freeze({ x, y }) as ViewportPoint);
 }
 
-/** Convert a validated viewport point through the current identity viewport transform. */
-export function viewportToPagePoint(point: ViewportPoint): Result<EditorPagePoint> {
-  const x = point.x;
-  const y = point.y;
+/** Validate one page point produced by a camera transform before Core consumes it. */
+export function editorPagePoint(x: number, y: number): Result<EditorPagePoint> {
   if (!Number.isFinite(x)) return failure('/page/x');
   if (!Number.isFinite(y)) return failure('/page/y');
   return success(Object.freeze({ x, y }) as EditorPagePoint);
+}
+
+/** Convert a validated viewport point through the current identity viewport transform. */
+export function viewportToPagePoint(point: ViewportPoint): Result<EditorPagePoint> {
+  return editorPagePoint(point.x, point.y);
 }
 
 /** Normalize two page points into a positive-size page rectangle. */

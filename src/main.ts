@@ -15,6 +15,7 @@ declare global {
       audit: () => SceneAudit;
       trace: () => readonly import('@vectojs/devtools/headless').EventTraceEntry[];
       interaction: () => EditorInteractionSnapshot;
+      camera: () => ReturnType<EditorShell['cameraSnapshot']>;
       interactionErrors: () => readonly import('@vectojs/brings-core').BringsError[];
       undo: () => import('@vectojs/brings-core').Result<
         import('@vectojs/brings-core').EditorSnapshot
@@ -96,6 +97,7 @@ if (debugMode) {
         audit: () => auditScene(scene),
         trace: () => trace.entries,
         interaction: () => shell.interactionSnapshot(),
+        camera: () => shell.cameraSnapshot(),
         interactionErrors: () => interactionErrors.read(),
         undo: () => {
           const result = editor.undo();
