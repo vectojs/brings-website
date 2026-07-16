@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Reworked the editor into a professional local-first shell with a slim
+  document bar, fixed desktop Pages/Layers and Properties panels, a compact
+  viewport-owned tool dock, projected local-save and history state, and a
+  navigation-only narrow-screen mode.
+- Upgraded to Brings Core 0.13.0, VectoJS Core 1.9.1, and VectoJS UI 1.9.1 to
+  use the latest document-opening, retained primitive, ContextMenu, and dynamic
+  accessibility-state fixes.
+- Extracted reusable editor chrome entities from the interaction-heavy shell so
+  command surfaces, camera status, projected labels, and responsive notices can
+  evolve independently from document behavior.
 - Added deterministic edge and centre snapping for move and axis-aligned
   resize interactions, including dynamic Shift/Alt modifier sampling,
   canvas-native alignment guides, exact one-command commits, cancellation

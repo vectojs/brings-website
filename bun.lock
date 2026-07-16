@@ -5,9 +5,9 @@
     "": {
       "name": "brings-website",
       "dependencies": {
-        "@vectojs/brings-core": "0.12.0",
-        "@vectojs/core": "1.8.0",
-        "@vectojs/ui": "1.9.0",
+        "@vectojs/brings-core": "0.13.0",
+        "@vectojs/core": "1.9.1",
+        "@vectojs/ui": "1.9.1",
       },
       "devDependencies": {
         "@changesets/cli": "^2.31.0",
@@ -383,13 +383,13 @@
 
     "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
 
-    "@vectojs/brings-core": ["@vectojs/brings-core@0.12.0", "", {}, "sha512-g6ajMkSrvSdysEOPiHGaGC8LyqhA1ECmgMSGAYVcxfd74Glx0WKj1W80caYx+35ZEdA47ajVfFXf+cT51LbdWA=="],
+    "@vectojs/brings-core": ["@vectojs/brings-core@0.13.0", "", {}, "sha512-0gwuI/oS1AzIVsVfkiCKYw9nX8yEs5KqLOf75fEdm+sLQN02qi2RnPi9GqTw/ua+Md2xaUoVtkpULUSA+cQ4zg=="],
 
-    "@vectojs/core": ["@vectojs/core@1.8.0", "", {}, "sha512-PYKRRDMXYLGDkQz9TXGKpKiMCeKHLnkQLXQKmEUxdoIJnEn6ln/JTtYD1WJkRpMOE83FlRkssTikEMIDxouqzA=="],
+    "@vectojs/core": ["@vectojs/core@1.9.1", "", {}, "sha512-uc9eY3mrSYUM6/H/Zve+icmuz/1JmkDR3WQqZPCDsq8PYBm1o17DlCF441J/uR1M+8x4bPbbrFS9bSNNeSH4dg=="],
 
     "@vectojs/devtools": ["@vectojs/devtools@0.4.2", "", { "peerDependencies": { "@vectojs/core": ">=1.0.0 <2.0.0", "@vectojs/ui": ">=1.0.0 <2.0.0" }, "optionalPeers": ["@vectojs/ui"] }, "sha512-Y4FHpgz6+kinSFLxeJtfrDhC6vA00BoJoJK1mxz3ZHK+twnOGJKXAa+zeSyEp1LnIsfK92i+6KidacO9FlhgoQ=="],
 
-    "@vectojs/ui": ["@vectojs/ui@1.9.0", "", { "dependencies": { "marked": "^18.0.6", "mathjax-full": "^3.2.2" }, "peerDependencies": { "@vectojs/core": ">=1.8.0 <2.0.0" } }, "sha512-3HnTgZRaXSLiGaxR3olptg4IdjAE8HgfxmgqEXYiGzaj28PZlHrX+sY82PLOG/4GaOolEXJBDeOcdIdFeKZTCg=="],
+    "@vectojs/ui": ["@vectojs/ui@1.9.1", "", { "dependencies": { "marked": "^18.0.6", "mathjax-full": "^3.2.2" }, "peerDependencies": { "@vectojs/core": ">=1.8.0 <2.0.0" } }, "sha512-r8rZGVy476b/8wNI9kaOsHeBTvYdJNrZ1M6OfeVFrKQ/hycwSXMuRIJ8z7oE8dPrVBVYSY4AJtuFyoe81S2vng=="],
 
     "@xmldom/xmldom": ["@xmldom/xmldom@0.9.10", "", {}, "sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw=="],
 

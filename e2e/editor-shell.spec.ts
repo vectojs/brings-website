@@ -227,9 +227,53 @@ test('projects one named Brings application shell', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('canvas')).toHaveCount(1);
   await expect(page.getByRole('application', { name: 'Brings design editor' })).toBeVisible();
-  await expect(page.getByRole('toolbar', { name: 'Tools' })).toBeVisible();
+  await expect(page.getByRole('toolbar', { name: 'Document controls' })).toBeVisible();
+  await expect(page.getByRole('toolbar', { name: 'Creation tools' })).toBeVisible();
   await expect(page.getByRole('tree', { name: 'Layers' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Design canvas' })).toBeVisible();
+  await expect(page.getByText('Saved locally', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Redo' })).toBeDisabled();
+});
+
+test('keeps floating dock controls inside the design viewport across shell modes', async ({
+  page,
+}) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 780, height: 600 },
+    { width: 700, height: 600 },
+    { width: 390, height: 600 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/?debug');
+    await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+    const canvasBounds = await page.getByRole('region', { name: 'Design canvas' }).boundingBox();
+    const dockBounds = await page.getByRole('toolbar', { name: 'Creation tools' }).boundingBox();
+    if (canvasBounds === null || dockBounds === null)
+      throw new Error('Shell regions not projected.');
+
+    expect(dockBounds.x).toBeGreaterThanOrEqual(canvasBounds.x);
+    expect(dockBounds.y).toBeGreaterThanOrEqual(canvasBounds.y);
+    expect(dockBounds.x + dockBounds.width).toBeLessThanOrEqual(
+      canvasBounds.x + canvasBounds.width,
+    );
+    expect(dockBounds.y + dockBounds.height).toBeLessThanOrEqual(
+      canvasBounds.y + canvasBounds.height,
+    );
+    if (viewport.width < 600) {
+      await expect(page.getByRole('button', { name: /Frame/ })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Rectangle/ })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Text/ })).toHaveCount(0);
+    }
+
+    const findings = await page.evaluate(() => {
+      const debug = Reflect.get(window, '__brings') as { audit: () => unknown[] };
+      return debug.audit();
+    });
+    expect(findings).toEqual([]);
+  }
 });
 
 test('loads the headless DevTools model only for debug sessions', async ({ page }) => {
@@ -319,6 +363,7 @@ test('creates a Frame and nested Rectangle through canvas-native tools', async (
 
   await page.getByRole('button', { name: /Frame/ }).click();
   await page.getByRole('region', { name: 'Design canvas' }).click({ position: { x: 180, y: 164 } });
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled();
   await page.getByRole('button', { name: /Rectangle/ }).click();
   await page.getByRole('region', { name: 'Design canvas' }).click({ position: { x: 220, y: 204 } });
 
@@ -1159,9 +1204,11 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
     visual: null,
   });
 
-  await page.getByRole('button', { name: /Frame/ }).click();
+  await page.getByRole('button', { name: /Frame/ }).focus();
+  await page.keyboard.press('Enter');
   await page.mouse.click((bounds.x + 100) * pageScale, (bounds.y + 120) * pageScale);
-  await page.getByRole('button', { name: /Select/ }).click();
+  await page.getByRole('button', { name: /Select/ }).focus();
+  await page.keyboard.press('Enter');
   await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
   await expect.poll(async () => (await readDebug(page)).snapshot.selection.nodeIds.length).toBe(1);
   const readHandleRaster = () =>
@@ -1193,9 +1240,11 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   expect((await readDebug(page)).interaction.phase).toBe('pending');
   await page.mouse.up();
 
-  await page.getByRole('button', { name: 'Frame', exact: true }).click();
+  await page.getByRole('button', { name: 'Frame', exact: true }).focus();
+  await page.keyboard.press('Enter');
   await page.mouse.click((bounds.x + 600) * pageScale, (bounds.y + 120) * pageScale);
-  await page.getByRole('button', { name: /Select/ }).click();
+  await page.getByRole('button', { name: /Select/ }).focus();
+  await page.keyboard.press('Enter');
   await page.mouse.click((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
   await page.mouse.move((bounds.x + 140) * pageScale, (bounds.y + 160) * pageScale);
   await page.mouse.down();

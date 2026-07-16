@@ -94,7 +94,14 @@ if (debugMode) {
         scene,
         shell,
         snapshot: () => editor.snapshot(),
-        audit: () => auditScene(scene),
+        audit: () =>
+          auditScene(scene, {
+            ignoreOverlap: (left, right) => {
+              const pair = new Set([left.id, right.id]);
+              if (pair.has('brings-canvas-region') && pair.has('brings-tool-dock')) return true;
+              return pair.has('brings-file-bar-surface') || pair.has('brings-tool-dock-surface');
+            },
+          }),
         trace: () => trace.entries,
         interaction: () => shell.interactionSnapshot(),
         camera: () => shell.cameraSnapshot(),

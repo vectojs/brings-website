@@ -33,9 +33,9 @@
     "commitlint": "commitlint"
   },
   "dependencies": {
-    "@vectojs/brings-core": "0.12.0",
-    "@vectojs/core": "1.8.0",
-    "@vectojs/ui": "1.9.0"
+    "@vectojs/brings-core": "0.13.0",
+    "@vectojs/core": "1.9.1",
+    "@vectojs/ui": "1.9.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
