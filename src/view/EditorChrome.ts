@@ -186,12 +186,12 @@ export class CanvasLabel extends Entity {
 
   public setFrame(
     x: number,
-    y: number,
+    baselineY: number,
     visible: boolean,
     maxWidth = Number.POSITIVE_INFINITY,
   ): void {
     this.x = x;
-    this.y = y;
+    this.y = baselineY - 14;
     this.width = visible ? Math.max(1, Math.min(maxWidth, this.text.length * 8)) : 0;
     this.height = visible ? 20 : 0;
     this.visible = visible;
@@ -208,6 +208,6 @@ export class CanvasLabel extends Entity {
   }
 
   public override render(renderer: IRenderer): void {
-    if (this.visible) renderer.fillText(this.text, 0, 0, this.font, this.color);
+    if (this.visible) renderer.fillText(this.text, 0, 14, this.font, this.color);
   }
 }

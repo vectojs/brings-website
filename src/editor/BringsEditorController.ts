@@ -732,6 +732,35 @@ export class BringsEditorController {
     return this.finishOperation(snapshot.selection, result);
   }
 
+  /** Create an Ellipse in the latest Frame created by this local editor session. */
+  public createEllipseAt(x: number, y: number): Result<EditorSnapshot> {
+    if (this.activeFrameId === null) return this.failure('shape.frame-required', '/parentId');
+    const snapshot = this.store.snapshot();
+    const frame = snapshot.document.nodes.find((node) => node.id === this.activeFrameId);
+    if (frame?.type !== 'frame') return this.failure('shape.frame-required', '/parentId');
+    const localX = Math.max(0, Math.min(frame.width - 120, x - frame.transform[4]));
+    const localY = Math.max(0, Math.min(frame.height - 120, y - frame.transform[5]));
+    const result = this.store.execute({
+      kind: 'create-ellipse',
+      pageId: snapshot.document.activePageId,
+      parentId: frame.id,
+      index: frame.childIds.length,
+      ellipse: {
+        id: this.createUuid(),
+        name: 'Ellipse',
+        visible: true,
+        locked: false,
+        opacity: 1,
+        transform: [1, 0, 0, 1, localX, localY],
+        width: 120,
+        height: 120,
+        fill: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
+        stroke: null,
+      },
+    });
+    return this.finishOperation(snapshot.selection, result);
+  }
+
   /** Create editable auto-width text in the latest Frame created by this local editor session. */
   public createTextAt(x: number, y: number): Result<EditorSnapshot> {
     if (this.activeFrameId === null) return this.failure('shape.frame-required', '/parentId');

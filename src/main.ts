@@ -45,12 +45,18 @@ const shell = new EditorShell(1, 1, {
   selectLayer: (nodeIds, activeNodeId) => editor.setLayerSelection(nodeIds, activeNodeId),
   setLayerVisibility: (nodeId) => editor.toggleLayerVisibility(nodeId),
   setSelectionProperties: (patch) => editor.setSelectionProperties(patch),
-  createAt: (tool, x, y) =>
-    tool === 'frame'
-      ? editor.createFrameAt(x, y)
-      : tool === 'text'
-        ? editor.createTextAt(x, y)
-        : editor.createRectangleAt(x, y),
+  createAt: (tool, x, y) => {
+    switch (tool) {
+      case 'frame':
+        return editor.createFrameAt(x, y);
+      case 'rectangle':
+        return editor.createRectangleAt(x, y);
+      case 'ellipse':
+        return editor.createEllipseAt(x, y);
+      case 'text':
+        return editor.createTextAt(x, y);
+    }
+  },
   beginSelectionInteraction: () => editor.beginSelectionInteraction(),
   proposePointSelection: (start, point, mode) =>
     editor.proposePointSelection({ start, point, mode }),

@@ -26,7 +26,7 @@ export function resolveEditorLayout(width: number, height: number): EditorLayout
     viewport: EditorLayout['viewport'],
   ): EditorLayout => {
     const mode = width >= 600 ? 'authoring' : 'navigation';
-    const requestedWidth = mode === 'authoring' ? 448 : 208;
+    const requestedWidth = mode === 'authoring' ? 492 : 208;
     const availableWidth = Math.max(0, viewport.width - 24);
     const dockWidth = viewport.height >= 64 ? Math.min(requestedWidth, availableWidth) : 0;
     const dockHeight = dockWidth > 0 ? 48 : 0;

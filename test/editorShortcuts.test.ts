@@ -30,6 +30,27 @@ describe('editor shortcuts', () => {
   });
 
   test.each([
+    ['v', 'tool-select'],
+    ['F', 'tool-frame'],
+    ['r', 'tool-rectangle'],
+    ['O', 'tool-ellipse'],
+    ['t', 'tool-text'],
+  ] as const)('maps unmodified %s to %s', (key, expected) => {
+    expect(resolveEditorShortcut({ key, ctrlKey: false, metaKey: false, shiftKey: false })).toBe(
+      expected,
+    );
+  });
+
+  test.each([
+    { key: 'o', ctrlKey: true, metaKey: false, shiftKey: false },
+    { key: 'o', ctrlKey: false, metaKey: true, shiftKey: false },
+    { key: 'o', ctrlKey: false, metaKey: false, altKey: true, shiftKey: false },
+    { key: 'o', ctrlKey: false, metaKey: false, shiftKey: true },
+  ])('does not switch tools for modified event %o', (event) => {
+    expect(resolveEditorShortcut(event)).toBeNull();
+  });
+
+  test.each([
     [{ tagName: 'input' }, true],
     [{ tagName: 'TEXTAREA' }, true],
     [{ tagName: 'div', isContentEditable: true }, true],

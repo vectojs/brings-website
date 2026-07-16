@@ -390,6 +390,104 @@ test('creates a Frame and nested Rectangle through canvas-native tools', async (
     });
 });
 
+test('creates an Ellipse through its keyboard tool and preserves Core history', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await canvas.click({ position: { x: 180, y: 164 } });
+  await page.keyboard.press('o');
+  await expect(page.getByRole('button', { name: 'Ellipse tool selected' })).toBeVisible();
+  await canvas.click({ position: { x: 240, y: 224 } });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as {
+          snapshot: () => {
+            document: {
+              revision: number;
+              nodes: readonly { type: string; parentId: string | null }[];
+            };
+            undoDepth: number;
+          };
+        };
+        return debug.snapshot();
+      }),
+    )
+    .toMatchObject({
+      document: {
+        revision: 2,
+        nodes: [
+          { type: 'frame', parentId: null },
+          { type: 'ellipse', parentId: expect.any(String) },
+        ],
+      },
+      undoDepth: 2,
+    });
+
+  await page.keyboard.press('v');
+  await canvas.click({ position: { x: 300, y: 284 } });
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as BrowserDebugApi;
+        const snapshot = debug.snapshot();
+        return snapshot.document.nodes.find((node) => node.id === snapshot.selection.activeNodeId)
+          ?.type;
+      }),
+    )
+    .toBe('ellipse');
+
+  const width = page.getByRole('textbox', { name: 'Width' });
+  await width.fill('140');
+  await width.press('Enter');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as BrowserDebugApi;
+        const snapshot = debug.snapshot();
+        const ellipse = snapshot.document.nodes.find((node) => node.type === 'ellipse');
+        return {
+          revision: snapshot.document.revision,
+          width: ellipse?.width,
+          undoDepth: snapshot.undoDepth,
+        };
+      }),
+    )
+    .toEqual({ revision: 3, width: 140, undoDepth: 3 });
+
+  await canvas.focus();
+  await page.keyboard.press('Delete');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as BrowserDebugApi;
+        return debug.snapshot().document.nodes.map((node) => node.type);
+      }),
+    )
+    .toEqual(['frame']);
+  await page.keyboard.press('Control+z');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const debug = Reflect.get(window, '__brings') as BrowserDebugApi;
+        return debug.snapshot().document.nodes.find((node) => node.type === 'ellipse')?.width;
+      }),
+    )
+    .toBe(140);
+
+  const findings = await page.evaluate(() => {
+    const debug = Reflect.get(window, '__brings') as { audit: () => unknown[] };
+    return debug.audit();
+  });
+  expect(findings).toEqual([]);
+});
+
 test('creates selected text and commits native content editing through Core', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/?debug');

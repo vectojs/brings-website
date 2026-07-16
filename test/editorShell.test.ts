@@ -537,9 +537,9 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
   expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
   expect({ x: dock.x, y: dock.y, width: dock.width, height: dock.height }).toEqual({
-    x: 126,
+    x: 104,
     y: 532,
-    width: 448,
+    width: 492,
     height: 48,
   });
 
@@ -551,6 +551,7 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   shell.resize(390, 600);
   expect(childById(shell, 'brings-frame-tool').width).toBe(0);
   expect(childById(shell, 'brings-rectangle-tool').width).toBe(0);
+  expect(childById(shell, 'brings-ellipse-tool').width).toBe(0);
   expect(text.width).toBe(0);
   expect(zoomIn.x + zoomIn.width + 8).toBeLessThanOrEqual(dock.width);
 });
@@ -668,10 +669,15 @@ test('projects selected-node properties and commits only through the Core port',
 
   const name = childById(shell, 'brings-property-name');
   const opacity = childById(shell, 'brings-property-opacity');
+  const width = childById(shell, 'brings-property-width');
+  const position = childById(shell, 'brings-position-label');
+  const appearance = childById(shell, 'brings-appearance-label');
   const visible = childById(shell, 'brings-property-visible');
   expect(name.getA11yAttributes()).toMatchObject({ label: 'Name', value: 'Rectangle' });
   expect(opacity.getA11yAttributes()).toMatchObject({ label: 'Opacity', value: '100' });
   expect(visible.getA11yAttributes()).toEqual({ role: 'switch', label: 'Visible', checked: true });
+  expect(position.y + position.height).toBeLessThanOrEqual(width.y);
+  expect(appearance.y + appearance.height).toBeLessThanOrEqual(opacity.y);
 
   visible.dispatchEvent(new VectoJSEvent('pointerdown', visible, { button: 0 }));
   expect(patches).toEqual([{ visible: false }]);
@@ -777,6 +783,32 @@ test('starts with the Select tool active so canvas clicks select instead of crea
   const selectTool = childById(shell, 'brings-select-tool');
 
   expect(selectTool.getA11yAttributes()).toEqual({ role: 'button', label: 'Select tool selected' });
+});
+
+test('routes unmodified tool shortcuts from the focused VMT design region', () => {
+  const shell = new EditorShell(1440, 900);
+  const canvasRegion = childById(shell, 'brings-canvas-region');
+  let prevented = false;
+  const event = new VectoJSEvent('keydown', canvasRegion, {
+    key: 'O',
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+
+  canvasRegion.dispatchEvent(event);
+
+  expect(prevented).toBe(true);
+  expect(event.propagationStopped).toBe(true);
+  expect(childById(shell, 'brings-ellipse-tool').getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Ellipse tool selected',
+  });
 });
 
 test('routes unmodified deletion from the focused VMT design region', () => {
@@ -1682,6 +1714,44 @@ test('renders axis-aligned node scale instead of dropping durable affine terms',
     matrix: [2, 0, 0, 1.5, 348, 168],
     args: [0, 0, 100, 80, [0, 0, 0, 0]],
   });
+});
+
+test('renders and outlines Ellipse nodes through renderer-independent cubic paths', () => {
+  const base = editorSnapshot([second]);
+  const snapshot: EditorSnapshot = {
+    ...base,
+    document: {
+      ...base.document,
+      nodes: base.document.nodes.map((node) =>
+        node.id === second
+          ? {
+              id: node.id,
+              name: 'Ellipse',
+              parentId: node.parentId,
+              visible: true,
+              locked: false,
+              opacity: 1,
+              transform: node.transform,
+              type: 'ellipse',
+              width: 20,
+              height: 16,
+              fill: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
+              stroke: null,
+            }
+          : node,
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => snapshot });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.calls.filter((call) => call.method === 'bezierCurveTo')).toHaveLength(8);
+  expect(recording.calls).toContainEqual({ method: 'moveTo', args: [10, 0] });
+  expect(recording.calls).toContainEqual({ method: 'moveTo', args: [10, -2] });
+  expect(recording.calls.some((call) => call.method === 'fill')).toBe(true);
+  expect(recording.calls).toContainEqual({ method: 'stroke', args: ['#2563eb', 2] });
 });
 
 test('composes scaled descendants and keeps selected movement in page space', () => {
