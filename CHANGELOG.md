@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added Figma-style drag-to-size creation for Frame, Rectangle, and Ellipse,
+  including click defaults, dynamic Shift aspect constraints, Alt center
+  expansion, canvas-native previews, atomic Core commits, cancellation without
+  history, and detached DevTools diagnostics.
 - Added an Ellipse creation tool backed by the public Brings Core command,
   cubic Bézier rendering with exact Core ellipse hit geometry, layer and
   property integration, atomic history, and the unmodified `O` shortcut.

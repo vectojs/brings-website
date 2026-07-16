@@ -54,6 +54,15 @@ import {
   type ResizeSelectionSessionSnapshot,
 } from './ResizeSelectionSession';
 import { SelectionGestureInterpreter } from './SelectionGestureInterpreter';
+import {
+  CreationGestureSession,
+  type CreationBounds,
+  type CreationGestureEffect,
+  type CreationGestureSessionSnapshot,
+  type CreationGestureVisual,
+  type CreationPointerSample,
+  type CreationShapeTool,
+} from './CreationGestureSession';
 
 export type DrawerSide = 'left' | 'right';
 
@@ -234,11 +243,26 @@ type ResizeEditorInteractionSnapshot = Readonly<{
   visual: SelectionGestureVisual | null;
 }>;
 
+type CreationEditorInteractionSnapshot = Readonly<{
+  phase: CreationGestureSessionSnapshot['phase'];
+  terminalEffect: CreationGestureSessionSnapshot['terminalEffect'];
+  pointerId: number;
+  shiftKey: boolean;
+  altKey: boolean;
+  start: CreationGestureSessionSnapshot['start'];
+  current: CreationGestureSessionSnapshot['current'];
+  tool: CreationShapeTool;
+  bounds: CreationBounds;
+  visual: null;
+  creationVisual: CreationGestureVisual | null;
+}>;
+
 /** Fresh JSON-safe diagnostic state exposed only through the debug reader. */
 export type EditorInteractionSnapshot =
   | IdleEditorInteractionSnapshot
   | SelectionEditorInteractionSnapshot
-  | ResizeEditorInteractionSnapshot;
+  | ResizeEditorInteractionSnapshot
+  | CreationEditorInteractionSnapshot;
 
 function pointerInvalid(path: string, pointerId: number | null): NativePointerFailure {
   return Object.freeze({
@@ -294,6 +318,42 @@ function snapshotResizeSession(
       maxY: session.bounds.maxY,
     }),
     visual: snapshotVisual(visual),
+  });
+}
+
+function snapshotCreationVisual(
+  visual: CreationGestureVisual | null,
+): CreationGestureVisual | null {
+  return visual === null
+    ? null
+    : Object.freeze({
+        tool: visual.tool,
+        bounds: Object.freeze({ ...visual.bounds }),
+      });
+}
+
+function snapshotCreationSession(
+  session: CreationGestureSessionSnapshot,
+  visual: CreationGestureVisual | null,
+): CreationEditorInteractionSnapshot {
+  return Object.freeze({
+    phase: session.phase,
+    terminalEffect: session.terminalEffect,
+    pointerId: session.pointerId,
+    shiftKey: session.shiftKey,
+    altKey: session.altKey,
+    start: Object.freeze({
+      viewport: Object.freeze({ ...session.start.viewport }),
+      page: Object.freeze({ ...session.start.page }),
+    }),
+    current: Object.freeze({
+      viewport: Object.freeze({ ...session.current.viewport }),
+      page: Object.freeze({ ...session.current.page }),
+    }),
+    tool: session.tool,
+    bounds: Object.freeze({ ...session.bounds }),
+    visual: null,
+    creationVisual: snapshotCreationVisual(visual),
   });
 }
 
@@ -379,6 +439,10 @@ export interface EditorShellPorts {
   readonly setLayerVisibility?: (nodeId: string) => Result<EditorSnapshot>;
   readonly setSelectionProperties?: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   readonly createAt?: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
+  readonly createInBounds?: (
+    tool: CreationShapeTool,
+    bounds: CreationBounds,
+  ) => Result<EditorSnapshot>;
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
   readonly proposeAreaSelection?: SelectionProposalProvider['area'];
@@ -412,6 +476,7 @@ type ResolvedEditorShellPorts = Readonly<{
   setLayerVisibility: (nodeId: string) => Result<EditorSnapshot>;
   setSelectionProperties: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   createAt: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
+  createInBounds: (tool: CreationShapeTool, bounds: CreationBounds) => Result<EditorSnapshot>;
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
   proposeAreaSelection: SelectionProposalProvider['area'];
@@ -467,6 +532,7 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   setLayerVisibility: () => unavailable('layer.visibility-unavailable'),
   setSelectionProperties: () => unavailable('properties.unavailable'),
   createAt: () => unavailable('shape.unavailable'),
+  createInBounds: () => unavailable('shape.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
   proposeMove: (_start, proposal, delta) => ({
@@ -503,6 +569,7 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
     setSelectionProperties:
       ports.setSelectionProperties ?? DEFAULT_EDITOR_SHELL_PORTS.setSelectionProperties,
     createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
+    createInBounds: ports.createInBounds ?? DEFAULT_EDITOR_SHELL_PORTS.createInBounds,
     beginSelectionInteraction:
       ports.beginSelectionInteraction ??
       (() => {
@@ -847,8 +914,14 @@ export class EditorShell extends Entity {
   private resizeSession: ResizeSelectionSession | null = null;
   private resizePointerId: number | null = null;
   private resizeInteraction: CapturedResizeInteraction | null = null;
+  private creationSession: CreationGestureSession | null = null;
+  private creationPointerId: number | null = null;
+  private creationVisual: CreationGestureVisual | null = null;
   private terminalInteraction:
-    SelectionGestureSessionSnapshot | ResizeSelectionSessionSnapshot | null = null;
+    | SelectionGestureSessionSnapshot
+    | ResizeSelectionSessionSnapshot
+    | CreationGestureSessionSnapshot
+    | null = null;
   private pointerRouteVersion = 0;
   private readonly quarantinedPointerIds = new Set<number>();
   private readonly reportedRenderErrors = new Set<string>();
@@ -944,6 +1017,10 @@ export class EditorShell extends Entity {
 
   /** Read a fresh detached interaction snapshot without exposing mutation controls. */
   public interactionSnapshot(): EditorInteractionSnapshot {
+    const activeCreation = this.creationSession?.snapshot();
+    if (activeCreation !== undefined) {
+      return snapshotCreationSession(activeCreation, this.creationVisual);
+    }
     const activeResize = this.resizeSession?.snapshot();
     if (activeResize !== undefined) {
       return snapshotResizeSession(activeResize, this.selectionInterpreter.visual);
@@ -959,6 +1036,9 @@ export class EditorShell extends Entity {
         current: null,
         visual: null,
       });
+    }
+    if ('tool' in source) {
+      return snapshotCreationSession(source, null);
     }
     if ('handle' in source) {
       return snapshotResizeSession(source, this.selectionInterpreter.visual);
@@ -1002,13 +1082,22 @@ export class EditorShell extends Entity {
   }
 
   public resize(width: number, height: number): void {
-    if (this.authoringEnabled && width < 600 && this.resizeSession !== null) {
-      const session = this.resizeSession;
-      const pointerId = this.resizePointerId;
-      const effect = session.cancel({ kind: 'escape' });
-      this.closeResizeSession(session);
-      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
-      this.selectionInterpreter.apply(effect);
+    if (this.authoringEnabled && width < 600) {
+      if (this.creationSession !== null) {
+        const session = this.creationSession;
+        const pointerId = this.creationPointerId;
+        const effect = session.cancel({ kind: 'authoring-disabled' });
+        this.closeCreationSession(session);
+        if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+        this.applyCreationEffect(effect);
+      } else if (this.resizeSession !== null) {
+        const session = this.resizeSession;
+        const pointerId = this.resizePointerId;
+        const effect = session.cancel({ kind: 'escape' });
+        this.closeResizeSession(session);
+        if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+        this.selectionInterpreter.apply(effect);
+      }
     }
     this.width = width;
     this.height = height;
@@ -1499,6 +1588,7 @@ export class EditorShell extends Entity {
     // stroke and handle dimensions, matching the editor convention used by Figma.
     renderer.save();
     renderer.scale(1 / this.camera.state.zoom, 1 / this.camera.state.zoom);
+    this.renderCreationPreview(renderer, this.camera.state.zoom);
     this.renderAlignmentGuides(renderer, visual?.guides ?? [], this.camera.state.zoom);
     this.renderResizeOverlay(renderer, visual, this.camera.state.zoom);
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
@@ -1522,6 +1612,26 @@ export class EditorShell extends Entity {
       renderer.restore();
     }
     renderer.restore();
+    renderer.restore();
+  }
+
+  private renderCreationPreview(renderer: IRenderer, zoom: number): void {
+    const visual = this.creationVisual;
+    if (visual === null) return;
+    const bounds = visual.bounds;
+    const x = bounds.x * zoom;
+    const y = bounds.y * zoom;
+    const width = bounds.width * zoom;
+    const height = bounds.height * zoom;
+    renderer.save();
+    renderer.setGlobalAlpha(1);
+    renderer.beginPath();
+    if (visual.tool === 'ellipse') appendEllipsePath(renderer, x, y, width, height);
+    else renderer.roundRect(x, y, width, height, visual.tool === 'rectangle' ? 8 : 0);
+    renderer.fill(
+      visual.tool === 'frame' ? 'rgba(255, 255, 255, 0.55)' : 'rgba(37, 99, 235, 0.22)',
+    );
+    renderer.stroke('#2563eb', 1);
     renderer.restore();
   }
 
@@ -1617,7 +1727,8 @@ export class EditorShell extends Entity {
       return;
     }
 
-    const activePointerId = this.resizePointerId ?? this.selectionPointerId;
+    const activePointerId =
+      this.creationPointerId ?? this.resizePointerId ?? this.selectionPointerId;
     if (this.cameraPointerId !== null && this.cameraPointerId !== pointerId) {
       if (event.type === 'pointerdown') this.quarantinedPointerIds.add(pointerId);
       return;
@@ -1630,6 +1741,14 @@ export class EditorShell extends Entity {
     if (event.type === 'pointercancel') {
       if (this.cameraPointerId === pointerId) {
         this.closeCameraPointer();
+        event.preventDefault();
+        return;
+      }
+      const creationSession = this.creationSession;
+      if (creationSession !== null && this.creationPointerId === pointerId) {
+        const effect = creationSession.cancel({ kind: 'pointercancel', pointerId });
+        this.closeCreationSession(creationSession);
+        this.applyCreationEffect(effect);
         event.preventDefault();
         return;
       }
@@ -1667,6 +1786,11 @@ export class EditorShell extends Entity {
       this.routeCameraPointer(event);
       return;
     }
+    const creationSession = this.creationSession;
+    if (creationSession !== null && this.creationPointerId === pointerId) {
+      this.routeCreationPointer(event, native, creationSession);
+      return;
+    }
     const resizeSession = this.resizeSession;
     if (resizeSession !== null && this.resizePointerId === pointerId) {
       this.routeResizePointer(event, native, resizeSession);
@@ -1700,6 +1824,38 @@ export class EditorShell extends Entity {
       if (this.selectionSession !== session) return;
       this.closeSelectionSession(session);
       this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+    }
+  }
+
+  private routeCreationPointer(
+    event: VectoJSEvent,
+    native: NativePointerSnapshot,
+    session: CreationGestureSession,
+  ): void {
+    const pointerId = native.pointerId;
+    const sampled = this.creationSample(event, native);
+    if (!sampled.ok) {
+      const effect = session.cancel({ kind: 'error' });
+      this.closeCreationSession(session);
+      if (event.type !== 'pointerup') this.quarantinedPointerIds.add(pointerId);
+      this.applyCreationEffect(effect);
+      this.ports.reportInteractionError(sampled.error);
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointermove') {
+      const effect = session.update(sampled.value);
+      if (this.creationSession !== session) return;
+      this.applyCreationEffect(effect);
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointerup') {
+      const effect = session.finish(sampled.value);
+      if (this.creationSession !== session) return;
+      this.closeCreationSession(session);
+      this.applyCreationEffect(effect);
       event.preventDefault();
     }
   }
@@ -1764,7 +1920,8 @@ export class EditorShell extends Entity {
       return;
     }
     if (!this.authoringEnabled) return;
-    const activePointerId = this.resizePointerId ?? this.selectionPointerId;
+    const activePointerId =
+      this.creationPointerId ?? this.resizePointerId ?? this.selectionPointerId;
     if (activePointerId !== null) {
       if (activePointerId !== pointerId) this.quarantinedPointerIds.add(pointerId);
       return;
@@ -1780,17 +1937,28 @@ export class EditorShell extends Entity {
       return;
     }
 
-    if (this.activeTool !== 'select') {
-      if (native.altKey) {
-        this.quarantinedPointerIds.add(pointerId);
-        return;
-      }
+    if (this.activeTool === 'text') {
       const result = this.ports.createAt(
         this.activeTool,
         sampled.value.pagePoint.x,
         sampled.value.pagePoint.y,
       );
       if (result.ok) this.refreshDocumentState();
+      return;
+    }
+
+    if (this.activeTool !== 'select') {
+      const creationSample: CreationPointerSample = Object.freeze({
+        pointerId,
+        viewportPoint: sampled.value.viewportPoint,
+        pagePoint: sampled.value.pagePoint,
+        shiftKey: native.shiftKey,
+        altKey: native.altKey,
+      });
+      this.creationSession = CreationGestureSession.begin(this.activeTool, creationSample);
+      this.creationPointerId = pointerId;
+      this.creationVisual = null;
+      this.terminalInteraction = null;
       return;
     }
 
@@ -1997,6 +2165,17 @@ export class EditorShell extends Entity {
       return;
     }
 
+    const creationSession = this.creationSession;
+    if (creationSession !== null && this.creationPointerId === pointerId) {
+      const effect = creationSession.cancel({ kind: 'error' });
+      this.closeCreationSession(creationSession);
+      if (!terminal) this.quarantinedPointerIds.add(pointerId);
+      this.applyCreationEffect(effect);
+      this.ports.reportInteractionError(failure.error);
+      event.preventDefault();
+      return;
+    }
+
     const resizeSession = this.resizeSession;
     if (resizeSession !== null && this.resizePointerId === pointerId) {
       const effect = resizeSession.cancel({ kind: 'error', error: failure.error });
@@ -2038,6 +2217,28 @@ export class EditorShell extends Entity {
         pagePoint: page.value,
         shiftKey: native.shiftKey,
       },
+    };
+  }
+
+  private creationSample(
+    event: VectoJSEvent,
+    native: Readonly<{
+      pointerId: number;
+      shiftKey: boolean;
+      altKey: boolean;
+    }>,
+  ): Result<CreationPointerSample> {
+    const sampled = this.selectionSample(event, native);
+    if (!sampled.ok) return sampled;
+    return {
+      ok: true,
+      value: Object.freeze({
+        pointerId: native.pointerId,
+        viewportPoint: sampled.value.viewportPoint,
+        pagePoint: sampled.value.pagePoint,
+        shiftKey: native.shiftKey,
+        altKey: native.altKey,
+      }),
     };
   }
 
@@ -2189,6 +2390,33 @@ export class EditorShell extends Entity {
     return true;
   }
 
+  private closeCreationSession(expected: CreationGestureSession): boolean {
+    if (this.creationSession !== expected) return false;
+    const terminal = expected.snapshot();
+    this.creationSession = null;
+    this.creationPointerId = null;
+    this.creationVisual = null;
+    this.terminalInteraction = terminal.phase === 'terminal' ? terminal : null;
+    return true;
+  }
+
+  private applyCreationEffect(effect: CreationGestureEffect): void {
+    if (effect.kind === 'ignore') return;
+    if (effect.kind === 'preview') {
+      this.creationVisual = snapshotCreationVisual(effect.visual);
+      this.scene?.markDirty();
+      return;
+    }
+    this.creationVisual = null;
+    if (effect.kind === 'commit') {
+      const result = this.ports.createInBounds(effect.tool, effect.bounds);
+      if (result.ok) this.refreshDocumentState();
+      else this.ports.reportInteractionError(result.error);
+      return;
+    }
+    this.scene?.markDirty();
+  }
+
   private closeResizeSession(expected: ResizeSelectionSession): boolean {
     if (this.resizeSession !== expected) return false;
     const terminal = expected.snapshot();
@@ -2205,8 +2433,15 @@ export class EditorShell extends Entity {
     // A tool switch is a transactional boundary: no preview owned by the old
     // tool may remain visible or accept a late terminal pointer event.
     this.pointerRouteVersion += 1;
-    const resizeSession = this.resizeSession;
-    if (resizeSession !== null) {
+    const creationSession = this.creationSession;
+    if (creationSession !== null) {
+      const pointerId = this.creationPointerId;
+      const effect = creationSession.cancel({ kind: 'tool-change' });
+      this.closeCreationSession(creationSession);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.applyCreationEffect(effect);
+    } else if (this.resizeSession !== null) {
+      const resizeSession = this.resizeSession;
       const pointerId = this.resizePointerId;
       const effect = resizeSession.cancel({ kind: 'escape' });
       this.closeResizeSession(resizeSession);
@@ -2237,6 +2472,17 @@ export class EditorShell extends Entity {
       !this.shouldYieldNativeEditor(event)
     ) {
       this.spacePanHeld = true;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === 'Escape' && this.creationSession !== null) {
+      const session = this.creationSession;
+      const pointerId = this.creationPointerId;
+      const effect = session.cancel({ kind: 'escape' });
+      this.closeCreationSession(session);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      this.applyCreationEffect(effect);
       event.preventDefault();
       event.stopPropagation();
       return;

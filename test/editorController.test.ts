@@ -139,6 +139,75 @@ test('creates a clamped nested Ellipse through the published Core command API', 
   expect(controller.snapshot().document.nodes[1]?.type).toBe('ellipse');
 });
 
+test('creates Frame, Rectangle, and Ellipse from explicit page bounds with one command each', () => {
+  const ids = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    '44444444-4444-4444-8444-444444444444',
+    '55555555-5555-4555-8555-555555555555',
+  ];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (!id) throw new Error('fixture exhausted');
+    return id;
+  });
+  const frameBounds = unwrap(pageRectBetween(pagePoint(80, 100), pagePoint(380, 300)));
+  const rectangleBounds = unwrap(pageRectBetween(pagePoint(100, 120), pagePoint(260, 210)));
+  const ellipseBounds = unwrap(pageRectBetween(pagePoint(350, 250), pagePoint(450, 350)));
+
+  unwrap(controller.createFrameInBounds(frameBounds));
+  unwrap(controller.createRectangleInBounds(rectangleBounds));
+  unwrap(controller.createEllipseInBounds(ellipseBounds));
+
+  expect(controller.snapshot()).toMatchObject({
+    document: {
+      revision: 3,
+      nodes: [
+        {
+          type: 'frame',
+          transform: [1, 0, 0, 1, 80, 100],
+          width: 300,
+          height: 200,
+        },
+        {
+          type: 'rectangle',
+          transform: [1, 0, 0, 1, 20, 20],
+          width: 160,
+          height: 90,
+        },
+        {
+          type: 'ellipse',
+          transform: [1, 0, 0, 1, 200, 100],
+          width: 100,
+          height: 100,
+        },
+      ],
+    },
+    undoDepth: 3,
+  });
+  unwrap(controller.undo());
+  expect(controller.snapshot()).toMatchObject({ document: { revision: 4, nodes: [{}, {}] } });
+});
+
+test('rejects invalid explicit creation bounds without allocating or mutating history', () => {
+  const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (!id) throw new Error('unexpected allocation');
+    return id;
+  });
+  const before = controller.snapshot();
+
+  expect(
+    controller.createFrameInBounds({ x: 0, y: 0, width: Number.NaN, height: 20 } as never),
+  ).toEqual({
+    ok: false,
+    error: { code: 'interaction.coordinate-invalid', path: '/bounds' },
+  });
+  expect(controller.snapshot()).toEqual(before);
+});
+
 test('creates editable text through the published Core command API', () => {
   const ids = [
     '11111111-1111-4111-8111-111111111111',

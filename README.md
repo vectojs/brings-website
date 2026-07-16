@@ -14,9 +14,14 @@ projection.
 The application provides a professional responsive editor shell with a local
 document status bar, fixed desktop Pages/Layers and Properties panels, a
 viewport-owned creation dock, and navigation-only authoring controls on narrow
-screens. It owns a Core-backed document session with Frame, Rectangle, Ellipse, and Text
-creation, ordered layers, selected-node properties, grouping, frontmost canvas
-selection, camera pan/zoom, and local undo/redo history.
+screens. It owns a Core-backed document session with Frame, Rectangle, Ellipse,
+and Text creation, ordered layers, selected-node properties, grouping,
+frontmost canvas selection, camera pan/zoom, and local undo/redo history.
+Frame, Rectangle, and Ellipse tools use one transactional creation session:
+click retains the documented default size, drag defines explicit page bounds,
+Shift preserves the tool's default aspect ratio, and Alt expands from the
+pointer-down center. Escape, `pointercancel`, tool changes, and authoring-mode
+loss discard the live VectoJS preview without changing Core history.
 Select-tool drags render a transient VectoJS preview, commit exactly one Core
 transform command on `pointerup`, and roll back without history on
 `pointercancel`. Move and axis-aligned resize previews snap object edges and

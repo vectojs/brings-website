@@ -674,8 +674,20 @@ export class BringsEditorController {
 
   /** Create a Frame at page-space coordinates and retain it as the shape parent. */
   public createFrameAt(x: number, y: number): Result<EditorSnapshot> {
+    return this.createFrameInBounds(
+      Object.freeze({ x, y, width: 400, height: 300 }) as EditorPageRect,
+    );
+  }
+
+  /** Create a root Frame from validated page-space bounds. */
+  public createFrameInBounds(
+    bounds: Readonly<{ x: number; y: number; width: number; height: number }>,
+  ): Result<EditorSnapshot> {
+    const captured = this.captureCreationBounds(bounds);
+    if (!captured.ok) return captured;
     const id = this.createUuid();
     const snapshot = this.store.snapshot();
+    const geometry = captured.value;
     const result = this.store.execute({
       kind: 'create-frame',
       pageId: snapshot.document.activePageId,
@@ -689,9 +701,9 @@ export class BringsEditorController {
         visible: true,
         locked: false,
         opacity: 1,
-        transform: [1, 0, 0, 1, x, y],
-        width: 400,
-        height: 300,
+        transform: [1, 0, 0, 1, geometry.x, geometry.y],
+        width: geometry.width,
+        height: geometry.height,
         cornerRadii: [0, 0, 0, 0],
         background: { type: 'solid', r: 1, g: 1, b: 1, a: 1 },
         stroke: { paint: { type: 'solid', r: 0.8, g: 0.84, b: 0.9, a: 1 }, width: 1 },
@@ -704,12 +716,23 @@ export class BringsEditorController {
 
   /** Create a Rectangle in the latest Frame created by this local editor session. */
   public createRectangleAt(x: number, y: number): Result<EditorSnapshot> {
+    return this.createRectangleInBounds(
+      Object.freeze({ x, y, width: 120, height: 80 }) as EditorPageRect,
+    );
+  }
+
+  /** Create a Rectangle from page bounds, clamped into the active Frame. */
+  public createRectangleInBounds(
+    bounds: Readonly<{ x: number; y: number; width: number; height: number }>,
+  ): Result<EditorSnapshot> {
+    const captured = this.captureCreationBounds(bounds);
+    if (!captured.ok) return captured;
     if (this.activeFrameId === null) return this.failure('shape.frame-required', '/parentId');
     const snapshot = this.store.snapshot();
     const frame = snapshot.document.nodes.find((node) => node.id === this.activeFrameId);
     if (frame?.type !== 'frame') return this.failure('shape.frame-required', '/parentId');
-    const localX = Math.max(0, Math.min(frame.width - 120, x - frame.transform[4]));
-    const localY = Math.max(0, Math.min(frame.height - 80, y - frame.transform[5]));
+    const local = this.frameLocalCreationBounds(frame, captured.value);
+    if (!local.ok) return local;
     const result = this.store.execute({
       kind: 'create-rectangle',
       pageId: snapshot.document.activePageId,
@@ -721,9 +744,9 @@ export class BringsEditorController {
         visible: true,
         locked: false,
         opacity: 1,
-        transform: [1, 0, 0, 1, localX, localY],
-        width: 120,
-        height: 80,
+        transform: [1, 0, 0, 1, local.value.x, local.value.y],
+        width: local.value.width,
+        height: local.value.height,
         cornerRadii: [8, 8, 8, 8],
         fill: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
         stroke: null,
@@ -734,12 +757,23 @@ export class BringsEditorController {
 
   /** Create an Ellipse in the latest Frame created by this local editor session. */
   public createEllipseAt(x: number, y: number): Result<EditorSnapshot> {
+    return this.createEllipseInBounds(
+      Object.freeze({ x, y, width: 120, height: 120 }) as EditorPageRect,
+    );
+  }
+
+  /** Create an Ellipse from page bounds, clamped into the active Frame. */
+  public createEllipseInBounds(
+    bounds: Readonly<{ x: number; y: number; width: number; height: number }>,
+  ): Result<EditorSnapshot> {
+    const captured = this.captureCreationBounds(bounds);
+    if (!captured.ok) return captured;
     if (this.activeFrameId === null) return this.failure('shape.frame-required', '/parentId');
     const snapshot = this.store.snapshot();
     const frame = snapshot.document.nodes.find((node) => node.id === this.activeFrameId);
     if (frame?.type !== 'frame') return this.failure('shape.frame-required', '/parentId');
-    const localX = Math.max(0, Math.min(frame.width - 120, x - frame.transform[4]));
-    const localY = Math.max(0, Math.min(frame.height - 120, y - frame.transform[5]));
+    const local = this.frameLocalCreationBounds(frame, captured.value);
+    if (!local.ok) return local;
     const result = this.store.execute({
       kind: 'create-ellipse',
       pageId: snapshot.document.activePageId,
@@ -751,9 +785,9 @@ export class BringsEditorController {
         visible: true,
         locked: false,
         opacity: 1,
-        transform: [1, 0, 0, 1, localX, localY],
-        width: 120,
-        height: 120,
+        transform: [1, 0, 0, 1, local.value.x, local.value.y],
+        width: local.value.width,
+        height: local.value.height,
         fill: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
         stroke: null,
       },
@@ -865,6 +899,61 @@ export class BringsEditorController {
       token: { ...start.token },
       originalSelection: cloneSelection(start.selection),
       selection: cloneSelection(selection),
+    };
+  }
+
+  private captureCreationBounds(
+    bounds: Readonly<{ x: number; y: number; width: number; height: number }>,
+  ): Result<EditorPageRect> {
+    let x: number;
+    let y: number;
+    let width: number;
+    let height: number;
+    try {
+      x = bounds.x;
+      y = bounds.y;
+      width = bounds.width;
+      height = bounds.height;
+    } catch {
+      return this.failure('interaction.coordinate-invalid', '/bounds');
+    }
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+      return this.failure('interaction.coordinate-invalid', '/bounds');
+    }
+    return {
+      ok: true,
+      value: Object.freeze({ x, y, width, height }) as EditorPageRect,
+    };
+  }
+
+  private frameLocalCreationBounds(
+    frame: Extract<SceneNode, { type: 'frame' }>,
+    bounds: EditorPageRect,
+  ): Result<EditorPageRect> {
+    const [scaleX, shearY, shearX, scaleY, translateX, translateY] = frame.transform;
+    if (
+      shearX !== 0 ||
+      shearY !== 0 ||
+      scaleX === 0 ||
+      scaleY === 0 ||
+      ![scaleX, scaleY, translateX, translateY].every(Number.isFinite)
+    ) {
+      return this.failure('shape.frame-transform-unsupported', '/parentId');
+    }
+    const width = Math.min(frame.width, bounds.width / Math.abs(scaleX));
+    const height = Math.min(frame.height, bounds.height / Math.abs(scaleY));
+    const rawX =
+      scaleX > 0 ? (bounds.x - translateX) / scaleX : (bounds.x - translateX) / scaleX - width;
+    const rawY =
+      scaleY > 0 ? (bounds.y - translateY) / scaleY : (bounds.y - translateY) / scaleY - height;
+    const x = Math.max(0, Math.min(frame.width - width, rawX));
+    const y = Math.max(0, Math.min(frame.height - height, rawY));
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+      return this.failure('interaction.coordinate-invalid', '/bounds');
+    }
+    return {
+      ok: true,
+      value: Object.freeze({ x, y, width, height }) as EditorPageRect,
     };
   }
 
