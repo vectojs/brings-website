@@ -57,6 +57,16 @@ const shell = new EditorShell(1, 1, {
         return editor.createTextAt(x, y);
     }
   },
+  createInBounds: (tool, bounds) => {
+    switch (tool) {
+      case 'frame':
+        return editor.createFrameInBounds(bounds);
+      case 'rectangle':
+        return editor.createRectangleInBounds(bounds);
+      case 'ellipse':
+        return editor.createEllipseInBounds(bounds);
+    }
+  },
   beginSelectionInteraction: () => editor.beginSelectionInteraction(),
   proposePointSelection: (start, point, mode) =>
     editor.proposePointSelection({ start, point, mode }),

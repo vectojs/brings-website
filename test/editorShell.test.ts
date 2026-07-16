@@ -273,6 +273,21 @@ function dispatchPointer(
   return event;
 }
 
+function dispatchShortcut(shell: EditorShell, key: string): VectoJSEvent {
+  const canvas = childById(shell, 'brings-canvas-region');
+  const event = new VectoJSEvent('keydown', canvas, {
+    key,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    target: { tagName: 'CANVAS' },
+    preventDefault: () => undefined,
+  });
+  canvas.dispatchEvent(event);
+  return event;
+}
+
 function dispatchWheel(
   shell: EditorShell,
   input: Readonly<{
@@ -808,6 +823,125 @@ test('routes unmodified tool shortcuts from the focused VMT design region', () =
   expect(childById(shell, 'brings-ellipse-tool').getA11yAttributes()).toEqual({
     role: 'button',
     label: 'Ellipse tool selected',
+  });
+});
+
+test('defers shape creation until pointer up and exposes one live drag preview', () => {
+  const commits: Array<
+    Readonly<{
+      tool: 'frame' | 'rectangle' | 'ellipse';
+      bounds: Readonly<{ x: number; y: number; width: number; height: number }>;
+    }>
+  > = [];
+  const shell = new EditorShell(1440, 900, {
+    createInBounds: (tool, bounds) => {
+      commits.push({ tool, bounds: { ...bounds } });
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+  dispatchShortcut(shell, 'R');
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 301, x: 100, y: 120 });
+  expect(commits).toEqual([]);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'pending',
+    tool: 'rectangle',
+    pointerId: 301,
+    creationVisual: null,
+  });
+
+  dispatchPointer(shell, 'pointermove', { pointerId: 301, x: 170, y: 180 });
+  expect(commits).toEqual([]);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'drawing',
+    tool: 'rectangle',
+    bounds: { x: 100, y: 120, width: 70, height: 60 },
+    creationVisual: {
+      tool: 'rectangle',
+      bounds: { x: 100, y: 120, width: 70, height: 60 },
+    },
+  });
+
+  dispatchPointer(shell, 'pointerup', { pointerId: 301, x: 180, y: 190 });
+  expect(commits).toEqual([
+    { tool: 'rectangle', bounds: { x: 100, y: 120, width: 80, height: 70 } },
+  ]);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit',
+    creationVisual: null,
+  });
+});
+
+test('commits click defaults and samples Shift plus Alt at the latest creation event', () => {
+  const commits: Array<Readonly<{ tool: string; bounds: Readonly<Record<string, number>> }>> = [];
+  const shell = new EditorShell(1440, 900, {
+    createInBounds: (tool, bounds) => {
+      commits.push({ tool, bounds: { ...bounds } });
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+
+  dispatchShortcut(shell, 'F');
+  dispatchPointer(shell, 'pointerdown', { pointerId: 302, x: 40, y: 50 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 302, x: 42, y: 51 });
+  dispatchShortcut(shell, 'O');
+  dispatchPointer(shell, 'pointerdown', { pointerId: 303, x: 200, y: 300 });
+  dispatchPointer(shell, 'pointermove', {
+    pointerId: 303,
+    x: 230,
+    y: 320,
+    shiftKey: true,
+    altKey: true,
+  });
+  dispatchPointer(shell, 'pointerup', {
+    pointerId: 303,
+    x: 240,
+    y: 310,
+    shiftKey: false,
+    altKey: true,
+  });
+
+  expect(commits).toEqual([
+    { tool: 'frame', bounds: { x: 40, y: 50, width: 400, height: 300 } },
+    { tool: 'ellipse', bounds: { x: 160, y: 290, width: 80, height: 20 } },
+  ]);
+});
+
+test('discards creation on Escape, pointercancel, tool switch, and authoring loss', () => {
+  const commits: unknown[] = [];
+  const shell = new EditorShell(1440, 900, {
+    createInBounds: (tool, bounds) => {
+      commits.push({ tool, bounds });
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+  dispatchShortcut(shell, 'R');
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 304, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 304, x: 80, y: 90 });
+  expect(dispatchShortcut(shell, 'Escape').propagationStopped).toBe(true);
+  dispatchPointer(shell, 'pointerup', { pointerId: 304, x: 80, y: 90 });
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 305, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointercancel', { pointerId: 305, x: 30, y: 40 });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 306, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 306, x: 30, y: 40 });
+  dispatchShortcut(shell, 'O');
+  dispatchPointer(shell, 'pointerup', { pointerId: 306, x: 30, y: 40 });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 307, x: 10, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 307, x: 30, y: 40 });
+  shell.resize(390, 900);
+  dispatchPointer(shell, 'pointerup', { pointerId: 307, x: 30, y: 40 });
+
+  expect(commits).toEqual([]);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
   });
 });
 

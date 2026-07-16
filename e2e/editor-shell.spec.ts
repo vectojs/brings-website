@@ -19,8 +19,9 @@ type BrowserDebugSnapshot = Readonly<{
 }>;
 
 type BrowserInteraction = Readonly<{
-  phase: 'idle' | 'pending' | 'marquee' | 'moving' | 'resizing' | 'terminal';
-  terminalEffect: 'commit-selection' | 'commit-move' | 'commit-resize' | 'discard' | null;
+  phase: 'idle' | 'pending' | 'drawing' | 'marquee' | 'moving' | 'resizing' | 'terminal';
+  terminalEffect:
+    'commit' | 'commit-selection' | 'commit-move' | 'commit-resize' | 'discard' | null;
   pointerId: number | null;
   shiftKey: boolean | null;
   altKey?: boolean | null;
@@ -37,7 +38,21 @@ type BrowserInteraction = Readonly<{
   resizeStart?: Readonly<{ x: number; y: number }>;
   resizeCurrent?: Readonly<{ x: number; y: number }>;
   anchor?: Readonly<{ x: number; y: number }> | null;
-  bounds?: Readonly<{ minX: number; minY: number; maxX: number; maxY: number }>;
+  tool?: 'frame' | 'rectangle' | 'ellipse';
+  bounds?: Readonly<{
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    minX?: number;
+    minY?: number;
+    maxX?: number;
+    maxY?: number;
+  }>;
+  creationVisual?: Readonly<{
+    tool: 'frame' | 'rectangle' | 'ellipse';
+    bounds: Readonly<{ x: number; y: number; width: number; height: number }>;
+  }> | null;
   visual: Readonly<{
     selection: Readonly<{ nodeIds: readonly string[]; activeNodeId: string | null }>;
     marquee: Readonly<{ x: number; y: number; width: number; height: number }> | null;
@@ -388,6 +403,120 @@ test('creates a Frame and nested Rectangle through canvas-native tools', async (
         { type: 'rectangle', parentId: expect.any(String) },
       ],
     });
+});
+
+test('draws exact shape bounds with live Shift and Alt creation diagnostics', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await canvas.focus();
+  const frameStart = await projectedPoint(page, { x: 100, y: 120 });
+  const frameEnd = await projectedPoint(page, { x: 500, y: 420 });
+  await page.keyboard.press('f');
+  await page.mouse.move(frameStart.x, frameStart.y);
+  await page.mouse.down();
+  await page.mouse.move(frameEnd.x, frameEnd.y);
+  expect((await readDebug(page)).interaction).toMatchObject({
+    phase: 'drawing',
+    tool: 'frame',
+    creationVisual: {
+      tool: 'frame',
+      bounds: { x: 100, y: 120, width: 400, height: 300 },
+    },
+  });
+  await page.mouse.up();
+
+  const rectangleStart = await projectedPoint(page, { x: 150, y: 170 });
+  const rectangleEnd = await projectedPoint(page, { x: 330, y: 260 });
+  await page.keyboard.press('r');
+  await page.mouse.move(rectangleStart.x, rectangleStart.y);
+  await page.mouse.down();
+  await page.keyboard.down('Shift');
+  await page.mouse.move(rectangleEnd.x, rectangleEnd.y);
+  expect((await readDebug(page)).interaction).toMatchObject({
+    phase: 'drawing',
+    shiftKey: true,
+    bounds: { x: 150, y: 170, width: 180, height: 120 },
+  });
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+
+  const ellipseCenter = await projectedPoint(page, { x: 350, y: 280 });
+  const ellipseEdge = await projectedPoint(page, { x: 390, y: 310 });
+  await page.keyboard.press('o');
+  await page.mouse.move(ellipseCenter.x, ellipseCenter.y);
+  await page.keyboard.down('Alt');
+  await page.keyboard.down('Shift');
+  await page.mouse.down();
+  await page.mouse.move(ellipseEdge.x, ellipseEdge.y);
+  expect((await readDebug(page)).interaction).toMatchObject({
+    phase: 'drawing',
+    shiftKey: true,
+    altKey: true,
+    bounds: { x: 310, y: 240, width: 80, height: 80 },
+  });
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+  await page.keyboard.up('Alt');
+
+  const finished = await readDebug(page);
+  expect(finished.snapshot).toMatchObject({
+    document: {
+      revision: 3,
+      nodes: [
+        { type: 'frame', transform: [1, 0, 0, 1, 100, 120], width: 400, height: 300 },
+        { type: 'rectangle', transform: [1, 0, 0, 1, 50, 50], width: 180, height: 120 },
+        { type: 'ellipse', transform: [1, 0, 0, 1, 210, 120], width: 80, height: 80 },
+      ],
+    },
+    undoDepth: 3,
+  });
+  expect(finished.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit',
+    creationVisual: null,
+  });
+  expect(finished.interactionErrors).toEqual([]);
+  const findings = await page.evaluate(() => {
+    const debug = Reflect.get(window, '__brings') as { audit: () => unknown[] };
+    return debug.audit();
+  });
+  expect(findings).toEqual([]);
+});
+
+test('cancels a live creation preview on Escape without document or history mutation', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await canvas.focus();
+  const start = await projectedPoint(page, { x: 100, y: 120 });
+  const end = await projectedPoint(page, { x: 300, y: 260 });
+  await page.keyboard.press('f');
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y);
+  expect((await readDebug(page)).interaction.phase).toBe('drawing');
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+
+  const cancelled = await readDebug(page);
+  expect(cancelled.snapshot).toMatchObject({
+    document: { revision: 0, nodes: [] },
+    undoDepth: 0,
+    redoDepth: 0,
+  });
+  expect(cancelled.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    creationVisual: null,
+  });
+  expect(cancelled.interactionErrors).toEqual([]);
 });
 
 test('creates an Ellipse through its keyboard tool and preserves Core history', async ({
