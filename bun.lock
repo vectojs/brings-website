@@ -6,7 +6,7 @@
       "name": "brings-website",
       "dependencies": {
         "@vectojs/brings-core": "0.15.0",
-        "@vectojs/core": "1.11.1",
+        "@vectojs/core": "1.11.3",
         "@vectojs/ui": "1.11.3",
       },
       "devDependencies": {
@@ -385,7 +385,7 @@
 
     "@vectojs/brings-core": ["@vectojs/brings-core@0.15.0", "", {}, "sha512-GxVNIWtNFNqOPBmlotvV7AVqxl7kmHQztmmugC06g0escFanVsZ8B+h9VZ7EptQgaqn3OA/ONhOVljwdwoOrhw=="],
 
-    "@vectojs/core": ["@vectojs/core@1.11.1", "", {}, "sha512-m9asot4G/WCFtK1Ri5pF4qXVVBJsB7b8Z/iVV4uXSS/QzxYjLLYpyNq4Oz4RuUe0KnDqq1erK5YH5W1ZXNOzrg=="],
+    "@vectojs/core": ["@vectojs/core@1.11.3", "", {}, "sha512-DsYDyzOpnQEhy8tsHxSIW/K0JkI6h4gt7GpTRl9dwFu5p/K0j+hF9VuRveenE5HGxEyGRhQwr7lckPDtff+N+A=="],
 
     "@vectojs/devtools": ["@vectojs/devtools@0.4.3", "", { "peerDependencies": { "@vectojs/core": ">=1.0.0 <2.0.0", "@vectojs/ui": ">=1.0.0 <2.0.0" }, "optionalPeers": ["@vectojs/ui"] }, "sha512-YgFziIgN7ECUPrIerkGBXvpmFORpUqm9WI5vcjonNERyS2bEj046/Nbf4QG8tsq+ufH7mCKNlldCNxF/VbWNmw=="],
 
