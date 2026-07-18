@@ -520,6 +520,105 @@ test('derives layers and executes Core-backed property and grouping commands', (
   ]);
 });
 
+test('selects active-page roots without history and arranges one sibling per Core command', () => {
+  const ids = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    '44444444-4444-4444-8444-444444444444',
+    '55555555-5555-4555-8555-555555555555',
+  ];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (!id) throw new Error('fixture exhausted');
+    return id;
+  });
+  unwrap(controller.createFrameAt(0, 0));
+  unwrap(controller.createFrameAt(500, 0));
+  unwrap(controller.createFrameAt(1000, 0));
+  const frameIds = controller.snapshot().document.pages[0]?.rootNodeIds ?? [];
+  const [firstFrame, secondFrame, thirdFrame] = frameIds;
+  if (firstFrame === undefined || secondFrame === undefined || thirdFrame === undefined) {
+    throw new Error('missing frames');
+  }
+
+  const beforeSelectAll = controller.snapshot();
+  unwrap(controller.selectAll());
+  expect(controller.snapshot()).toMatchObject({
+    document: { revision: beforeSelectAll.document.revision },
+    selection: { nodeIds: frameIds, activeNodeId: thirdFrame },
+    undoDepth: beforeSelectAll.undoDepth,
+  });
+
+  unwrap(controller.setLayerSelection([firstFrame], firstFrame));
+  unwrap(controller.arrangeSelection('forward'));
+  expect(controller.snapshot().document.pages[0]?.rootNodeIds).toEqual([
+    secondFrame,
+    firstFrame,
+    thirdFrame,
+  ]);
+  unwrap(controller.arrangeSelection('front'));
+  expect(controller.snapshot().document.pages[0]?.rootNodeIds).toEqual([
+    secondFrame,
+    thirdFrame,
+    firstFrame,
+  ]);
+  unwrap(controller.arrangeSelection('backward'));
+  expect(controller.snapshot().document.pages[0]?.rootNodeIds).toEqual([
+    secondFrame,
+    firstFrame,
+    thirdFrame,
+  ]);
+  unwrap(controller.arrangeSelection('back'));
+  expect(controller.snapshot()).toMatchObject({
+    document: {
+      revision: 7,
+      pages: [{ rootNodeIds: [firstFrame, secondFrame, thirdFrame] }],
+    },
+    selection: { nodeIds: [firstFrame], activeNodeId: firstFrame },
+    undoDepth: 7,
+  });
+  unwrap(controller.undo());
+  expect(controller.snapshot().document.pages[0]?.rootNodeIds).toEqual([
+    secondFrame,
+    firstFrame,
+    thirdFrame,
+  ]);
+});
+
+test('rejects unsupported or edge arrange requests without mutating controller state', () => {
+  const ids = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    '44444444-4444-4444-8444-444444444444',
+  ];
+  const controller = new BringsEditorController(() => {
+    const id = ids.shift();
+    if (!id) throw new Error('fixture exhausted');
+    return id;
+  });
+  unwrap(controller.createFrameAt(0, 0));
+  unwrap(controller.createFrameAt(500, 0));
+  const [firstFrame, secondFrame] = controller.snapshot().document.pages[0]?.rootNodeIds ?? [];
+  if (firstFrame === undefined || secondFrame === undefined) throw new Error('missing frames');
+  unwrap(controller.setLayerSelection([firstFrame], firstFrame));
+  const atBack = controller.debugInteractionState();
+
+  expect(controller.arrangeSelection('back')).toEqual({
+    ok: false,
+    error: { code: 'arrange.edge', path: '/selection' },
+  });
+  expect(controller.debugInteractionState()).toEqual(atBack);
+  unwrap(controller.setLayerSelection([firstFrame, secondFrame], secondFrame));
+  const multiple = controller.debugInteractionState();
+  expect(controller.arrangeSelection('front')).toEqual({
+    ok: false,
+    error: { code: 'selection.single-required', path: '/nodeIds' },
+  });
+  expect(controller.debugInteractionState()).toEqual(multiple);
+});
+
 test('begins with a detached selection and monotonically tracked interaction token', () => {
   const controller = populatedController();
   const start = controller.beginSelectionInteraction();

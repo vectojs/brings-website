@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a canvas-native editor context menu with right-click selection,
+  Select all, Group/Ungroup, Delete, nested Arrange commands, matching keyboard
+  shortcuts, one-command history, and full-chain overlay dismissal.
+- Upgraded to VectoJS Core 1.11.1, UI 1.11.3, and DevTools 0.4.3, consuming
+  same-frame semantic overlay stacking, unique nested-menu identities,
+  root-owned backdrop lifecycle, latest scene APIs, and expanded DevTools
+  regression coverage.
 - Added Figma-style drag-to-size creation for Frame, Rectangle, and Ellipse,
   including click defaults, dynamic Shift aspect constraints, Alt center
   expansion, canvas-native previews, atomic Core commits, cancellation without

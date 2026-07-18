@@ -2,8 +2,13 @@ export type EditorShortcutAction =
   | 'undo'
   | 'redo'
   | 'delete'
+  | 'select-all'
   | 'group'
   | 'ungroup'
+  | 'bring-forward'
+  | 'bring-front'
+  | 'send-backward'
+  | 'send-back'
   | 'tool-select'
   | 'tool-frame'
   | 'tool-rectangle'
@@ -24,7 +29,10 @@ export function resolveEditorShortcut(event: EditorShortcutEvent): EditorShortcu
   const primaryModifier = event.ctrlKey || event.metaKey;
   if (primaryModifier && key === 'z') return event.shiftKey ? 'redo' : 'undo';
   if (event.ctrlKey && key === 'y') return 'redo';
+  if (primaryModifier && key === 'a') return 'select-all';
   if (primaryModifier && key === 'g') return event.shiftKey ? 'ungroup' : 'group';
+  if (key === ']') return primaryModifier ? 'bring-front' : 'bring-forward';
+  if (key === '[') return primaryModifier ? 'send-back' : 'send-backward';
   const deletionModifier = primaryModifier || event.altKey === true || event.shiftKey;
   if (!deletionModifier && (key === 'delete' || key === 'backspace')) return 'delete';
   if (!deletionModifier) {

@@ -10,6 +10,11 @@ describe('editor shortcuts', () => {
     [{ key: 'y', ctrlKey: false, metaKey: true, shiftKey: false }, null],
     [{ key: 'g', ctrlKey: true, metaKey: false, shiftKey: false }, 'group'],
     [{ key: 'G', ctrlKey: false, metaKey: true, shiftKey: true }, 'ungroup'],
+    [{ key: 'a', ctrlKey: true, metaKey: false, shiftKey: false }, 'select-all'],
+    [{ key: ']', ctrlKey: false, metaKey: false, shiftKey: false }, 'bring-forward'],
+    [{ key: ']', ctrlKey: true, metaKey: false, shiftKey: false }, 'bring-front'],
+    [{ key: '[', ctrlKey: false, metaKey: false, shiftKey: false }, 'send-backward'],
+    [{ key: '[', ctrlKey: false, metaKey: true, shiftKey: false }, 'send-back'],
   ] as const)('resolves history event %o to %s', (event, expected) => {
     expect(resolveEditorShortcut(event)).toBe(expected);
   });
