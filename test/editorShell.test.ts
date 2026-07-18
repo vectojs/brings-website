@@ -19,6 +19,7 @@ import type {
   SelectionInteractionStart,
   SelectionProposal,
 } from '../src/editor/selectionInteraction';
+import type { CompletedPathInput } from '../src/editor/BringsEditorController';
 import { EditorShell } from '../src/view/EditorShell';
 
 const documentId = '00000000-0000-4000-8000-000000000001';
@@ -245,6 +246,7 @@ function dispatchPointer(
     altKey?: boolean;
     ctrlKey?: boolean;
     metaKey?: boolean;
+    detail?: number;
   }>,
 ): VectoJSEvent {
   const canvas = childById(shell, 'brings-canvas-region');
@@ -259,6 +261,7 @@ function dispatchPointer(
       altKey: input.altKey ?? false,
       ctrlKey: input.ctrlKey ?? false,
       metaKey: input.metaKey ?? false,
+      detail: input.detail ?? 0,
       get defaultPrevented() {
         return prevented;
       },
@@ -553,11 +556,13 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   const shell = new EditorShell(700, 600);
   const dock = childById(shell, 'brings-tool-dock');
   const text = childById(shell, 'brings-text-tool');
+  const pen = childById(shell, 'brings-pen-tool');
   const zoomOut = childById(shell, 'brings-zoom-out');
   const zoomReadout = childById(shell, 'brings-zoom-readout');
   const zoomIn = childById(shell, 'brings-zoom-in');
 
-  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(text.x + text.width).toBeLessThanOrEqual(pen.x);
+  expect(pen.x + pen.width).toBeLessThanOrEqual(zoomOut.x);
   expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
   expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
   expect({ x: dock.x, y: dock.y, width: dock.width, height: dock.height }).toEqual({
@@ -568,7 +573,8 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   });
 
   shell.resize(780, 600);
-  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(text.x + text.width).toBeLessThanOrEqual(pen.x);
+  expect(pen.x + pen.width).toBeLessThanOrEqual(zoomOut.x);
   expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
   expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
 
@@ -577,6 +583,7 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   expect(childById(shell, 'brings-rectangle-tool').width).toBe(0);
   expect(childById(shell, 'brings-ellipse-tool').width).toBe(0);
   expect(text.width).toBe(0);
+  expect(pen.width).toBe(0);
   expect(zoomIn.x + zoomIn.width + 8).toBeLessThanOrEqual(dock.width);
 });
 
@@ -952,6 +959,93 @@ test('discards creation on Escape, pointercancel, tool switch, and authoring los
     phase: 'terminal',
     terminalEffect: 'discard',
   });
+});
+
+test('routes the Pen shortcut, paints a transient contour, and commits once through Enter', () => {
+  const commits: CompletedPathInput[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot(),
+    createPath: (input) => {
+      commits.push(input);
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+
+  dispatchShortcut(shell, 'P');
+  expect(childById(shell, 'brings-pen-tool').getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Pen tool selected',
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 401, x: 20, y: 30 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 401, x: 20, y: 30 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 402, x: 90, y: 50 });
+  const preview = recordingRenderer();
+  shell.render(preview.renderer);
+  expect(preview.calls).toContainEqual({ method: 'moveTo', args: [20, 30] });
+  expect(preview.calls).toContainEqual({ method: 'lineTo', args: [90, 50] });
+  expect(preview.calls.filter((call) => call.method === 'arc').length).toBeGreaterThanOrEqual(2);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'drawing',
+    pointerId: null,
+    penVisual: {
+      network: [{ position: { x: 20, y: 30 } }],
+      previewAnchor: { position: { x: 90, y: 50 } },
+    },
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 403, x: 90, y: 50 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 403, x: 90, y: 50 });
+  const enter = dispatchShortcut(shell, 'Enter');
+
+  expect(enter.propagationStopped).toBe(true);
+  expect(commits).toHaveLength(1);
+  expect(commits[0]).toMatchObject({
+    closed: false,
+    anchors: [{ position: { x: 20, y: 30 } }, { position: { x: 90, y: 50 } }],
+  });
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit',
+    penVisual: null,
+  });
+});
+
+test('commits a closed cubic Pen contour and discards competing draft routes', () => {
+  const commits: CompletedPathInput[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot(),
+    createPath: (input) => {
+      commits.push(input);
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+  dispatchShortcut(shell, 'p');
+  dispatchPointer(shell, 'pointerdown', { pointerId: 410, x: 20, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 410, x: 32, y: 28 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 410, x: 32, y: 28 });
+  for (const [pointerId, x, y] of [
+    [411, 80, 20],
+    [412, 50, 70],
+  ] as const) {
+    dispatchPointer(shell, 'pointerdown', { pointerId, x, y });
+    dispatchPointer(shell, 'pointerup', { pointerId, x, y });
+  }
+  dispatchPointer(shell, 'pointerdown', { pointerId: 413, x: 22, y: 22 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 413, x: 22, y: 22 });
+
+  expect(commits).toHaveLength(1);
+  expect(commits[0]).toMatchObject({
+    closed: true,
+    anchors: [{ incomingControl: { x: -12, y: -8 }, outgoingControl: { x: 12, y: 8 } }, {}, {}],
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 414, x: 100, y: 100 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 414, x: 100, y: 100 });
+  dispatchShortcut(shell, 'Escape');
+  dispatchPointer(shell, 'pointerdown', { pointerId: 415, x: 110, y: 110 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 415, x: 110, y: 110 });
+  dispatchShortcut(shell, 'V');
+  expect(commits).toHaveLength(1);
 });
 
 test('routes unmodified deletion from the focused VMT design region', () => {

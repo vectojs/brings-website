@@ -276,6 +276,11 @@ export class PenPathSession {
     return Object.freeze({ kind: 'discard', reason: input.kind });
   }
 
+  /** Terminate a draft when its external coordinate route fails. */
+  public fail(cause: BringsError): PenPathEffect {
+    return this.failUnlessChanged(this.stateVersion, error(cause.code, cause.path));
+  }
+
   private static captureInitialSample(sample: PenPointerSample): Result<CapturedSample> {
     let pointerId: number;
     try {

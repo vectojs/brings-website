@@ -70,6 +70,7 @@ const shell = new EditorShell(1, 1, {
         return editor.createEllipseInBounds(bounds);
     }
   },
+  createPath: (input) => editor.createPath(input),
   beginSelectionInteraction: () => editor.beginSelectionInteraction(),
   proposePointSelection: (start, point, mode) =>
     editor.proposePointSelection({ start, point, mode }),

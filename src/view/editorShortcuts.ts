@@ -13,6 +13,7 @@ export type EditorShortcutAction =
   | 'tool-frame'
   | 'tool-rectangle'
   | 'tool-ellipse'
+  | 'tool-pen'
   | 'tool-text';
 
 export interface EditorShortcutEvent {
@@ -40,6 +41,7 @@ export function resolveEditorShortcut(event: EditorShortcutEvent): EditorShortcu
     if (key === 'f') return 'tool-frame';
     if (key === 'r') return 'tool-rectangle';
     if (key === 'o') return 'tool-ellipse';
+    if (key === 'p') return 'tool-pen';
     if (key === 't') return 'tool-text';
   }
   return null;

@@ -11,6 +11,19 @@ type BrowserDebugSnapshot = Readonly<{
       content?: string;
       width?: number;
       height?: number;
+      network?: Readonly<{
+        vertices: readonly Readonly<{
+          id: string;
+          position: Readonly<{ x: number; y: number }>;
+        }>[];
+        segments: readonly Readonly<{
+          id: string;
+          startVertexId: string;
+          endVertexId: string;
+          startControl: Readonly<{ x: number; y: number }>;
+          endControl: Readonly<{ x: number; y: number }>;
+        }>[];
+      }>;
     }>[];
   }>;
   selection: Readonly<{ nodeIds: readonly string[]; activeNodeId: string | null }>;
@@ -52,6 +65,19 @@ type BrowserInteraction = Readonly<{
   creationVisual?: Readonly<{
     tool: 'frame' | 'rectangle' | 'ellipse';
     bounds: Readonly<{ x: number; y: number; width: number; height: number }>;
+  }> | null;
+  penVisual?: Readonly<{
+    network: readonly Readonly<{
+      position: Readonly<{ x: number; y: number }>;
+      incomingControl: Readonly<{ x: number; y: number }>;
+      outgoingControl: Readonly<{ x: number; y: number }>;
+    }>[];
+    previewAnchor: Readonly<{
+      position: Readonly<{ x: number; y: number }>;
+      incomingControl: Readonly<{ x: number; y: number }>;
+      outgoingControl: Readonly<{ x: number; y: number }>;
+    }> | null;
+    closeCandidate: boolean;
   }> | null;
   visual: Readonly<{
     selection: Readonly<{ nodeIds: readonly string[]; activeNodeId: string | null }>;
@@ -529,6 +555,120 @@ test('cancels a live creation preview on Escape without document or history muta
     creationVisual: null,
   });
   expect(cancelled.interactionErrors).toEqual([]);
+});
+
+test('commits open and closed Pen contours atomically and discards an escaped draft', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+  await page.getByRole('button', { name: /Frame/ }).click();
+  await canvas.click({ position: { x: 180, y: 164 } });
+  const frame = (await readDebug(page)).snapshot.document.nodes.find(
+    (node) => node.type === 'frame',
+  );
+  if (frame === undefined) throw new Error('The Pen scenario requires an active Frame.');
+
+  await page.keyboard.press('p');
+  await expect(page.getByRole('button', { name: 'Pen tool selected' })).toBeVisible();
+  const first = await projectedPoint(page, { x: 240, y: 224 });
+  await page.mouse.move(first.x, first.y);
+  await page.mouse.down();
+  await page.mouse.move(first.x + 12, first.y + 8);
+  await page.mouse.up();
+  await canvas.click({ position: { x: 340, y: 224 } });
+  await canvas.click({ position: { x: 340, y: 324 } });
+
+  const drawing = await readDebug(page);
+  expect(drawing.interaction).toMatchObject({
+    phase: 'drawing',
+    pointerId: null,
+    penVisual: {
+      network: [{ incomingControl: { x: -12, y: -8 }, outgoingControl: { x: 12, y: 8 } }, {}, {}],
+      closeCandidate: false,
+    },
+  });
+  expect(drawing.snapshot).toMatchObject({
+    document: { revision: 1, nodes: [{ type: 'frame' }] },
+    undoDepth: 1,
+    redoDepth: 0,
+  });
+
+  await page.keyboard.press('Enter');
+  const open = await readDebug(page);
+  const openPath = open.snapshot.document.nodes.find((node) => node.type === 'path');
+  expect(openPath).toMatchObject({
+    parentId: frame.id,
+    transform: [1, 0, 0, 1, 0, 0],
+    network: {
+      vertices: [{}, {}, {}],
+      segments: [
+        { startControl: { x: 12, y: 8 }, endControl: { x: 0, y: 0 } },
+        { startControl: { x: 0, y: 0 }, endControl: { x: 0, y: 0 } },
+      ],
+    },
+  });
+  expect(open.snapshot).toMatchObject({
+    document: { revision: 2 },
+    selection: { nodeIds: [openPath?.id], activeNodeId: openPath?.id },
+    undoDepth: 2,
+    redoDepth: 0,
+  });
+  expect(open.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit',
+    penVisual: null,
+  });
+
+  await page.keyboard.press('Control+z');
+  expect((await readDebug(page)).snapshot).toMatchObject({
+    document: { revision: 3, nodes: [{ type: 'frame' }] },
+    undoDepth: 1,
+    redoDepth: 1,
+  });
+  await page.keyboard.press('Control+Shift+z');
+  expect((await readDebug(page)).snapshot).toMatchObject({
+    document: { revision: 4, nodes: [{ type: 'frame' }, { type: 'path' }] },
+    undoDepth: 2,
+    redoDepth: 0,
+  });
+
+  for (const position of [
+    { x: 260, y: 244 },
+    { x: 300, y: 244 },
+    { x: 280, y: 284 },
+    { x: 260, y: 244 },
+  ]) {
+    await canvas.click({ position });
+  }
+  const closed = await readDebug(page);
+  const paths = closed.snapshot.document.nodes.filter((node) => node.type === 'path');
+  expect(paths).toHaveLength(2);
+  expect(paths[1]?.network).toMatchObject({
+    vertices: [{}, {}, {}],
+    segments: [{}, {}, {}],
+  });
+  expect(closed.snapshot).toMatchObject({
+    document: { revision: 5 },
+    selection: { nodeIds: [paths[1]?.id], activeNodeId: paths[1]?.id },
+    undoDepth: 3,
+    redoDepth: 0,
+  });
+
+  const durable = closed.snapshot;
+  await canvas.click({ position: { x: 380, y: 264 } });
+  await page.keyboard.press('Escape');
+  const escaped = await readDebug(page);
+  expect(escaped.snapshot).toEqual(durable);
+  expect(escaped.interaction).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'discard',
+    penVisual: null,
+  });
+  expect(escaped.interactionErrors).toEqual([]);
 });
 
 test('creates an Ellipse through its keyboard tool and preserves Core history', async ({
@@ -1500,6 +1640,36 @@ test('keeps the logical threshold stable under high DPR and CDP page scale', asy
   await page.keyboard.press('Escape');
   await page.mouse.up();
   expect((await readDebug(page)).interaction.visual).toBeNull();
+
+  await page.getByRole('button', { name: 'Pen', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  for (const point of [
+    { x: 640, y: 160 },
+    { x: 700, y: 200 },
+  ]) {
+    await page.mouse.click((bounds.x + point.x) * pageScale, (bounds.y + point.y) * pageScale);
+  }
+  expect((await readDebug(page)).interaction).toMatchObject({
+    phase: 'drawing',
+    penVisual: { network: [{}, {}] },
+  });
+  await canvas.focus();
+  await page.keyboard.press('Enter');
+  const highDprPath = (await readDebug(page)).snapshot.document.nodes.find(
+    (node) => node.type === 'path',
+  );
+  expect(highDprPath).toMatchObject({
+    parentId: expect.any(String),
+    network: {
+      vertices: [{}, {}],
+      segments: [{}],
+    },
+  });
+  expect(highDprPath?.network?.vertices[0]?.position.x).toBeCloseTo(40, 3);
+  expect(highDprPath?.network?.vertices[0]?.position.y).toBeCloseTo(40, 3);
+  expect(highDprPath?.network?.vertices[1]?.position.x).toBeCloseTo(100, 3);
+  expect(highDprPath?.network?.vertices[1]?.position.y).toBeCloseTo(80, 3);
+  expect((await readDebug(page)).interactionErrors).toEqual([]);
   await cdp.detach();
 });
 
