@@ -39,6 +39,7 @@ describe('editor shortcuts', () => {
     ['F', 'tool-frame'],
     ['r', 'tool-rectangle'],
     ['O', 'tool-ellipse'],
+    ['p', 'tool-pen'],
     ['t', 'tool-text'],
   ] as const)('maps unmodified %s to %s', (key, expected) => {
     expect(resolveEditorShortcut({ key, ctrlKey: false, metaKey: false, shiftKey: false })).toBe(

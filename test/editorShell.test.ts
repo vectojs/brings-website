@@ -19,6 +19,7 @@ import type {
   SelectionInteractionStart,
   SelectionProposal,
 } from '../src/editor/selectionInteraction';
+import type { CompletedPathInput } from '../src/editor/BringsEditorController';
 import { EditorShell } from '../src/view/EditorShell';
 
 const documentId = '00000000-0000-4000-8000-000000000001';
@@ -245,6 +246,7 @@ function dispatchPointer(
     altKey?: boolean;
     ctrlKey?: boolean;
     metaKey?: boolean;
+    detail?: number;
   }>,
 ): VectoJSEvent {
   const canvas = childById(shell, 'brings-canvas-region');
@@ -259,6 +261,7 @@ function dispatchPointer(
       altKey: input.altKey ?? false,
       ctrlKey: input.ctrlKey ?? false,
       metaKey: input.metaKey ?? false,
+      detail: input.detail ?? 0,
       get defaultPrevented() {
         return prevented;
       },
@@ -553,11 +556,13 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   const shell = new EditorShell(700, 600);
   const dock = childById(shell, 'brings-tool-dock');
   const text = childById(shell, 'brings-text-tool');
+  const pen = childById(shell, 'brings-pen-tool');
   const zoomOut = childById(shell, 'brings-zoom-out');
   const zoomReadout = childById(shell, 'brings-zoom-readout');
   const zoomIn = childById(shell, 'brings-zoom-in');
 
-  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(text.x + text.width).toBeLessThanOrEqual(pen.x);
+  expect(pen.x + pen.width).toBeLessThanOrEqual(zoomOut.x);
   expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
   expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
   expect({ x: dock.x, y: dock.y, width: dock.width, height: dock.height }).toEqual({
@@ -568,7 +573,8 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   });
 
   shell.resize(780, 600);
-  expect(text.x + text.width).toBeLessThanOrEqual(zoomOut.x);
+  expect(text.x + text.width).toBeLessThanOrEqual(pen.x);
+  expect(pen.x + pen.width).toBeLessThanOrEqual(zoomOut.x);
   expect(zoomOut.x + zoomOut.width).toBeLessThanOrEqual(zoomReadout.x);
   expect(zoomReadout.x + zoomReadout.width).toBeLessThanOrEqual(zoomIn.x);
 
@@ -577,6 +583,7 @@ test('keeps authoring and navigation controls inside the viewport-owned dock', (
   expect(childById(shell, 'brings-rectangle-tool').width).toBe(0);
   expect(childById(shell, 'brings-ellipse-tool').width).toBe(0);
   expect(text.width).toBe(0);
+  expect(pen.width).toBe(0);
   expect(zoomIn.x + zoomIn.width + 8).toBeLessThanOrEqual(dock.width);
 });
 
@@ -952,6 +959,93 @@ test('discards creation on Escape, pointercancel, tool switch, and authoring los
     phase: 'terminal',
     terminalEffect: 'discard',
   });
+});
+
+test('routes the Pen shortcut, paints a transient contour, and commits once through Enter', () => {
+  const commits: CompletedPathInput[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot(),
+    createPath: (input) => {
+      commits.push(input);
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+
+  dispatchShortcut(shell, 'P');
+  expect(childById(shell, 'brings-pen-tool').getA11yAttributes()).toEqual({
+    role: 'button',
+    label: 'Pen tool selected',
+  });
+  dispatchPointer(shell, 'pointerdown', { pointerId: 401, x: 20, y: 30 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 401, x: 20, y: 30 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 402, x: 90, y: 50 });
+  const preview = recordingRenderer();
+  shell.render(preview.renderer);
+  expect(preview.calls).toContainEqual({ method: 'moveTo', args: [20, 30] });
+  expect(preview.calls).toContainEqual({ method: 'lineTo', args: [90, 50] });
+  expect(preview.calls.filter((call) => call.method === 'arc').length).toBeGreaterThanOrEqual(2);
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'drawing',
+    pointerId: null,
+    penVisual: {
+      network: [{ position: { x: 20, y: 30 } }],
+      previewAnchor: { position: { x: 90, y: 50 } },
+    },
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 403, x: 90, y: 50 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 403, x: 90, y: 50 });
+  const enter = dispatchShortcut(shell, 'Enter');
+
+  expect(enter.propagationStopped).toBe(true);
+  expect(commits).toHaveLength(1);
+  expect(commits[0]).toMatchObject({
+    closed: false,
+    anchors: [{ position: { x: 20, y: 30 } }, { position: { x: 90, y: 50 } }],
+  });
+  expect(shell.interactionSnapshot()).toMatchObject({
+    phase: 'terminal',
+    terminalEffect: 'commit',
+    penVisual: null,
+  });
+});
+
+test('commits a closed cubic Pen contour and discards competing draft routes', () => {
+  const commits: CompletedPathInput[] = [];
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => editorSnapshot(),
+    createPath: (input) => {
+      commits.push(input);
+      return { ok: true, value: editorSnapshot() };
+    },
+  });
+  dispatchShortcut(shell, 'p');
+  dispatchPointer(shell, 'pointerdown', { pointerId: 410, x: 20, y: 20 });
+  dispatchPointer(shell, 'pointermove', { pointerId: 410, x: 32, y: 28 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 410, x: 32, y: 28 });
+  for (const [pointerId, x, y] of [
+    [411, 80, 20],
+    [412, 50, 70],
+  ] as const) {
+    dispatchPointer(shell, 'pointerdown', { pointerId, x, y });
+    dispatchPointer(shell, 'pointerup', { pointerId, x, y });
+  }
+  dispatchPointer(shell, 'pointerdown', { pointerId: 413, x: 22, y: 22 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 413, x: 22, y: 22 });
+
+  expect(commits).toHaveLength(1);
+  expect(commits[0]).toMatchObject({
+    closed: true,
+    anchors: [{ incomingControl: { x: -12, y: -8 }, outgoingControl: { x: 12, y: 8 } }, {}, {}],
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 414, x: 100, y: 100 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 414, x: 100, y: 100 });
+  dispatchShortcut(shell, 'Escape');
+  dispatchPointer(shell, 'pointerdown', { pointerId: 415, x: 110, y: 110 });
+  dispatchPointer(shell, 'pointerup', { pointerId: 415, x: 110, y: 110 });
+  dispatchShortcut(shell, 'V');
+  expect(commits).toHaveLength(1);
 });
 
 test('routes unmodified deletion from the focused VMT design region', () => {
@@ -1960,6 +2054,150 @@ test('renders and outlines Ellipse nodes through renderer-independent cubic path
   expect(recording.calls).toContainEqual({ method: 'moveTo', args: [10, -2] });
   expect(recording.calls.some((call) => call.method === 'fill')).toBe(true);
   expect(recording.calls).toContainEqual({ method: 'stroke', args: ['#2563eb', 2] });
+});
+
+test('renders and outlines transformed Path nodes through IRenderer path commands', () => {
+  const base = editorSnapshot([second]);
+  const snapshot: EditorSnapshot = {
+    ...base,
+    document: {
+      ...base.document,
+      nodes: base.document.nodes.map((node) =>
+        node.id === second
+          ? {
+              id: node.id,
+              name: 'Path',
+              parentId: node.parentId,
+              visible: true,
+              locked: false,
+              opacity: 1,
+              transform: [2, 0, 0, 1.5, 10, 12],
+              type: 'path',
+              network: {
+                vertices: [
+                  { id: third, position: { x: 0, y: 0 } },
+                  { id: fourth, position: { x: 20, y: 0 } },
+                  {
+                    id: '55555555-5555-4555-8555-555555555555' as NodeId,
+                    position: { x: 10, y: 16 },
+                  },
+                ],
+                segments: [
+                  {
+                    id: '66666666-6666-4666-8666-666666666666' as NodeId,
+                    startVertexId: third,
+                    endVertexId: fourth,
+                    startControl: { x: 6, y: 0 },
+                    endControl: { x: -6, y: 0 },
+                  },
+                  {
+                    id: '77777777-7777-4777-8777-777777777777' as NodeId,
+                    startVertexId: fourth,
+                    endVertexId: '55555555-5555-4555-8555-555555555555' as NodeId,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                  {
+                    id: '88888888-8888-4888-8888-888888888888' as NodeId,
+                    startVertexId: '55555555-5555-4555-8555-555555555555' as NodeId,
+                    endVertexId: third,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                ],
+              },
+              fillRule: 'nonzero',
+              fill: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 0.3 },
+              stroke: {
+                paint: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
+                width: 2,
+              },
+            }
+          : node,
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => snapshot });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.calls).toContainEqual({ method: 'translate', args: [10, 12] });
+  expect(recording.calls).toContainEqual({ method: 'scale', args: [2, 1.5] });
+  expect(recording.calls.filter((call) => call.method === 'moveTo')).toHaveLength(2);
+  expect(recording.calls.filter((call) => call.method === 'bezierCurveTo')).toHaveLength(2);
+  expect(recording.calls.filter((call) => call.method === 'lineTo')).toHaveLength(4);
+  expect(recording.calls.filter((call) => call.method === 'closePath')).toHaveLength(2);
+  expect(recording.calls).toContainEqual({ method: 'fill', args: ['rgba(46, 115, 242, 0.3)'] });
+  expect(recording.calls).toContainEqual({
+    method: 'stroke',
+    args: ['rgba(46, 115, 242, 1)', 2],
+  });
+  expect(recording.calls).toContainEqual({ method: 'stroke', args: ['#2563eb', 2] });
+
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const extraA = '99999999-9999-4999-8999-999999999999' as NodeId;
+  const extraB = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' as NodeId;
+  const extraC = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' as NodeId;
+  const evenOdd: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.type === 'path'
+          ? {
+              ...node,
+              fillRule: 'evenodd',
+              network: {
+                vertices: [
+                  ...node.network.vertices,
+                  { id: extraA, position: { x: 30, y: 0 } },
+                  { id: extraB, position: { x: 50, y: 0 } },
+                  { id: extraC, position: { x: 40, y: 16 } },
+                ],
+                segments: [
+                  ...node.network.segments,
+                  {
+                    id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' as NodeId,
+                    startVertexId: extraA,
+                    endVertexId: extraB,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                  {
+                    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' as NodeId,
+                    startVertexId: extraB,
+                    endVertexId: extraC,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                  {
+                    id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' as NodeId,
+                    startVertexId: extraC,
+                    endVertexId: extraA,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                ],
+              },
+            }
+          : node,
+      ),
+    },
+  };
+  const unsupportedShell = new EditorShell(1440, 900, {
+    documentSnapshot: () => evenOdd,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  const unsupportedRecording = recordingRenderer();
+  unsupportedShell.render(unsupportedRecording.renderer);
+  unsupportedShell.render(recordingRenderer().renderer);
+
+  expect(unsupportedRecording.calls).not.toContainEqual({
+    method: 'fill',
+    args: ['rgba(46, 115, 242, 0.3)'],
+  });
+  expect(errors).toEqual([{ code: 'render.fill-rule-unsupported', path: '/nodes/1/fillRule' }]);
 });
 
 test('composes scaled descendants and keeps selected movement in page space', () => {

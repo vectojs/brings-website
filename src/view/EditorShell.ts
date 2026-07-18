@@ -23,7 +23,7 @@ import type {
   SceneNode,
   SelectionResizeProposal,
 } from '@vectojs/brings-core';
-import type { BringsLayerItem } from '../editor/BringsEditorController';
+import type { BringsLayerItem, CompletedPathInput } from '../editor/BringsEditorController';
 import { editorPagePoint, viewportPoint, type PageDelta } from '../editor/selectionCoordinates';
 import { createCameraViewport, normalizeWheelDelta } from './CameraViewport';
 import { CanvasLabel, MobileModeNotice, ToolbarButton, ZoomReadout } from './EditorChrome';
@@ -65,6 +65,14 @@ import {
   type CreationPointerSample,
   type CreationShapeTool,
 } from './CreationGestureSession';
+import { appendPathNetwork } from './pathGeometry';
+import {
+  PenPathSession,
+  type PenPathEffect,
+  type PenPathSessionSnapshot,
+  type PenPathVisual,
+  type PenPointerSample,
+} from './PenPathSession';
 
 export type DrawerSide = 'left' | 'right';
 
@@ -173,7 +181,7 @@ class EditorRegion extends Entity {
 }
 
 export type CreationTool = 'frame' | 'rectangle' | 'ellipse' | 'text';
-type CanvasTool = 'select' | CreationTool;
+type CanvasTool = 'select' | 'pen' | CreationTool;
 
 type NativePointerSnapshot = Readonly<{
   pointerId: number;
@@ -182,6 +190,7 @@ type NativePointerSnapshot = Readonly<{
   altKey: boolean;
   ctrlKey: boolean;
   metaKey: boolean;
+  detail: number;
 }>;
 
 type NativePointerSource = Readonly<{
@@ -191,6 +200,7 @@ type NativePointerSource = Readonly<{
   altKey?: boolean;
   ctrlKey?: boolean;
   metaKey?: boolean;
+  detail?: number;
 }>;
 
 type NativePointerFailure = Readonly<{
@@ -259,12 +269,24 @@ type CreationEditorInteractionSnapshot = Readonly<{
   creationVisual: CreationGestureVisual | null;
 }>;
 
+type PenEditorInteractionSnapshot = Readonly<{
+  phase: PenPathSessionSnapshot['phase'];
+  terminalEffect: PenPathSessionSnapshot['terminalEffect'];
+  pointerId: number | null;
+  shiftKey: null;
+  start: null;
+  current: null;
+  visual: null;
+  penVisual: PenPathVisual | null;
+}>;
+
 /** Fresh JSON-safe diagnostic state exposed only through the debug reader. */
 export type EditorInteractionSnapshot =
   | IdleEditorInteractionSnapshot
   | SelectionEditorInteractionSnapshot
   | ResizeEditorInteractionSnapshot
-  | CreationEditorInteractionSnapshot;
+  | CreationEditorInteractionSnapshot
+  | PenEditorInteractionSnapshot;
 
 function pointerInvalid(path: string, pointerId: number | null): NativePointerFailure {
   return Object.freeze({
@@ -359,6 +381,49 @@ function snapshotCreationSession(
   });
 }
 
+function snapshotPenAnchor(
+  anchor: CompletedPathInput['anchors'][number],
+): CompletedPathInput['anchors'][number] {
+  return Object.freeze({
+    position: Object.freeze({ x: anchor.position.x, y: anchor.position.y }),
+    incomingControl: Object.freeze({
+      x: anchor.incomingControl.x,
+      y: anchor.incomingControl.y,
+    }),
+    outgoingControl: Object.freeze({
+      x: anchor.outgoingControl.x,
+      y: anchor.outgoingControl.y,
+    }),
+  });
+}
+
+function snapshotPenVisual(visual: PenPathVisual | null): PenPathVisual | null {
+  return visual === null
+    ? null
+    : Object.freeze({
+        network: Object.freeze(visual.network.map(snapshotPenAnchor)),
+        previewAnchor:
+          visual.previewAnchor === null ? null : snapshotPenAnchor(visual.previewAnchor),
+        closeCandidate: visual.closeCandidate,
+      });
+}
+
+function snapshotPenSession(
+  session: PenPathSessionSnapshot,
+  visual: PenPathVisual | null,
+): PenEditorInteractionSnapshot {
+  return Object.freeze({
+    phase: session.phase,
+    terminalEffect: session.terminalEffect,
+    pointerId: session.pointerId,
+    shiftKey: null,
+    start: null,
+    current: null,
+    visual: null,
+    penVisual: snapshotPenVisual(visual),
+  });
+}
+
 function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGestureVisual | null {
   if (visual === null) return null;
   const marquee = visual.marquee;
@@ -449,6 +514,7 @@ export interface EditorShellPorts {
     tool: CreationShapeTool,
     bounds: CreationBounds,
   ) => Result<EditorSnapshot>;
+  readonly createPath?: (input: CompletedPathInput) => Result<EditorSnapshot>;
   readonly beginSelectionInteraction?: () => SelectionInteractionStart;
   readonly proposePointSelection?: SelectionProposalProvider['point'];
   readonly proposeAreaSelection?: SelectionProposalProvider['area'];
@@ -488,6 +554,7 @@ type ResolvedEditorShellPorts = Readonly<{
   setSelectionProperties: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
   createAt: (tool: CreationTool, x: number, y: number) => Result<EditorSnapshot>;
   createInBounds: (tool: CreationShapeTool, bounds: CreationBounds) => Result<EditorSnapshot>;
+  createPath: (input: CompletedPathInput) => Result<EditorSnapshot>;
   beginSelectionInteraction: () => SelectionInteractionStart;
   proposePointSelection: SelectionProposalProvider['point'];
   proposeAreaSelection: SelectionProposalProvider['area'];
@@ -547,6 +614,7 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   setSelectionProperties: () => unavailable('properties.unavailable'),
   createAt: () => unavailable('shape.unavailable'),
   createInBounds: () => unavailable('shape.unavailable'),
+  createPath: () => unavailable('path.unavailable'),
   proposePointSelection: () => unavailable('selection.unavailable'),
   proposeAreaSelection: () => unavailable('selection.unavailable'),
   proposeMove: (_start, proposal, delta) => ({
@@ -587,6 +655,7 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
       ports.setSelectionProperties ?? DEFAULT_EDITOR_SHELL_PORTS.setSelectionProperties,
     createAt: ports.createAt ?? DEFAULT_EDITOR_SHELL_PORTS.createAt,
     createInBounds: ports.createInBounds ?? DEFAULT_EDITOR_SHELL_PORTS.createInBounds,
+    createPath: ports.createPath ?? DEFAULT_EDITOR_SHELL_PORTS.createPath,
     beginSelectionInteraction:
       ports.beginSelectionInteraction ??
       (() => {
@@ -690,9 +759,11 @@ class LayerRow extends Entity {
           ? '◇'
           : item.type === 'ellipse'
             ? '○'
-            : item.type === 'text'
-              ? 'T'
-              : '◆';
+            : item.type === 'path'
+              ? '⌁'
+              : item.type === 'text'
+                ? 'T'
+                : '◆';
     renderer.fillText(glyph, 6, 17, '600 11px system-ui, sans-serif', '#aebed6');
     renderer.fillText(item.name, 24, 17, '500 12px system-ui, sans-serif', '#f3f6fb');
     if (item.locked)
@@ -896,6 +967,9 @@ export class EditorShell extends Entity {
   private readonly textTool = new ToolbarButton('brings-text-tool', 'Text', 'T', () => {
     this.activateTool('text');
   });
+  private readonly penTool = new ToolbarButton('brings-pen-tool', 'Pen', '⌁', () => {
+    this.activateTool('pen');
+  });
   private readonly zoomOutTool = new ToolbarButton('brings-zoom-out', 'Zoom out', '−', () => {
     this.zoomCamera(1 / 1.2);
   });
@@ -915,6 +989,7 @@ export class EditorShell extends Entity {
     this.rectangleTool,
     this.ellipseTool,
     this.textTool,
+    this.penTool,
     this.zoomOutTool,
     this.zoomReadout,
     this.zoomInTool,
@@ -942,10 +1017,14 @@ export class EditorShell extends Entity {
   private creationSession: CreationGestureSession | null = null;
   private creationPointerId: number | null = null;
   private creationVisual: CreationGestureVisual | null = null;
+  private penSession: PenPathSession | null = null;
+  private penPointerId: number | null = null;
+  private penVisual: PenPathVisual | null = null;
   private terminalInteraction:
     | SelectionGestureSessionSnapshot
     | ResizeSelectionSessionSnapshot
     | CreationGestureSessionSnapshot
+    | PenPathSessionSnapshot
     | null = null;
   private pointerRouteVersion = 0;
   private readonly quarantinedPointerIds = new Set<number>();
@@ -1046,6 +1125,10 @@ export class EditorShell extends Entity {
 
   /** Read a fresh detached interaction snapshot without exposing mutation controls. */
   public interactionSnapshot(): EditorInteractionSnapshot {
+    const activePen = this.penSession?.snapshot();
+    if (activePen !== undefined) {
+      return snapshotPenSession(activePen, this.penVisual);
+    }
     const activeCreation = this.creationSession?.snapshot();
     if (activeCreation !== undefined) {
       return snapshotCreationSession(activeCreation, this.creationVisual);
@@ -1068,6 +1151,9 @@ export class EditorShell extends Entity {
     }
     if ('tool' in source) {
       return snapshotCreationSession(source, null);
+    }
+    if ('network' in source) {
+      return snapshotPenSession(source, null);
     }
     if ('handle' in source) {
       return snapshotResizeSession(source, this.selectionInterpreter.visual);
@@ -1123,7 +1209,13 @@ export class EditorShell extends Entity {
   public resize(width: number, height: number): void {
     if (this.authoringEnabled && width < 600) {
       this.closeContextMenu();
-      if (this.creationSession !== null) {
+      if (this.penSession !== null) {
+        const session = this.penSession;
+        const pointerId = this.penPointerId;
+        const effect = session.cancel({ kind: 'authoring-disabled' });
+        this.applyPenEffect(session, effect);
+        if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      } else if (this.creationSession !== null) {
         const session = this.creationSession;
         const pointerId = this.creationPointerId;
         const effect = session.cancel({ kind: 'authoring-disabled' });
@@ -1234,7 +1326,8 @@ export class EditorShell extends Entity {
     this.rectangleTool.setFrame(88, 0, 36, this.activeTool === 'rectangle', authoring);
     this.ellipseTool.setFrame(132, 0, 36, this.activeTool === 'ellipse', authoring);
     this.textTool.setFrame(176, 0, 36, this.activeTool === 'text', authoring);
-    const zoomStart = authoring ? 248 : 44;
+    this.penTool.setFrame(220, 0, 36, this.activeTool === 'pen', authoring);
+    const zoomStart = authoring ? 268 : 44;
     this.zoomOutTool.setFrame(zoomStart, 0, 36, false);
     this.zoomReadout.setFrame(zoomStart + 40, 0, true, this.camera.state.zoom);
     this.zoomInTool.setFrame(zoomStart + 116, 0, 36, false);
@@ -1577,6 +1670,35 @@ export class EditorShell extends Entity {
           appendEllipsePath(renderer, -2, -2, node.width + 4, node.height + 4);
           renderer.stroke('#2563eb', 2);
         }
+      } else if (node.type === 'path') {
+        renderer.setGlobalAlpha(opacity);
+        const appended = appendPathNetwork(renderer, node.network, `/nodes/${nodeIndex}/network`);
+        if (!appended.ok) {
+          renderer.restore();
+          this.reportRenderErrorOnce(appended.error);
+          return;
+        }
+        const unsupportedEvenOddFill =
+          node.fill !== null && node.fillRule === 'evenodd' && appended.value.componentCount > 1;
+        if (unsupportedEvenOddFill) {
+          this.reportRenderErrorOnce({
+            code: 'render.fill-rule-unsupported',
+            path: `/nodes/${nodeIndex}/fillRule`,
+          });
+        } else if (node.fill !== null) {
+          renderer.fill(this.paint(node.fill));
+        }
+        if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+        if (selected.has(node.id)) {
+          renderer.setGlobalAlpha(1);
+          const outline = appendPathNetwork(renderer, node.network, `/nodes/${nodeIndex}/network`);
+          if (!outline.ok) {
+            renderer.restore();
+            this.reportRenderErrorOnce(outline.error);
+            return;
+          }
+          renderer.stroke('#2563eb', 2);
+        }
       } else if (node.type === 'text') {
         renderer.setGlobalAlpha(opacity);
         const font = `${node.fontWeight} ${node.fontSize}px ${node.fontFamilies.join(', ')}`;
@@ -1629,6 +1751,7 @@ export class EditorShell extends Entity {
     renderer.save();
     renderer.scale(1 / this.camera.state.zoom, 1 / this.camera.state.zoom);
     this.renderCreationPreview(renderer, this.camera.state.zoom);
+    this.renderPenPreview(renderer, this.camera.state.zoom);
     this.renderAlignmentGuides(renderer, visual?.guides ?? [], this.camera.state.zoom);
     this.renderResizeOverlay(renderer, visual, this.camera.state.zoom);
     if (visual?.marquee !== null && visual?.marquee !== undefined) {
@@ -1673,6 +1796,87 @@ export class EditorShell extends Entity {
     );
     renderer.stroke('#2563eb', 1);
     renderer.restore();
+  }
+
+  private renderPenPreview(renderer: IRenderer, zoom: number): void {
+    const visual = this.penVisual;
+    if (visual === null) return;
+    const anchors = [...visual.network];
+    let preview = visual.previewAnchor;
+    if (visual.closeCandidate && anchors.length >= 3) preview = anchors[0] ?? preview;
+    renderer.save();
+    renderer.setGlobalAlpha(1);
+    if (anchors.length > 0) {
+      renderer.beginPath();
+      renderer.moveTo(anchors[0]!.position.x * zoom, anchors[0]!.position.y * zoom);
+      for (let index = 1; index < anchors.length; index += 1) {
+        this.appendPenPreviewSegment(renderer, anchors[index - 1]!, anchors[index]!, zoom);
+      }
+      if (preview !== null) {
+        this.appendPenPreviewSegment(renderer, anchors.at(-1)!, preview, zoom);
+      }
+      renderer.stroke('#2563eb', 2);
+    }
+
+    const controls = preview === null ? anchors : [...anchors, preview];
+    for (const anchor of controls) {
+      this.renderPenHandles(renderer, anchor, zoom);
+      renderer.beginPath();
+      renderer.arc(anchor.position.x * zoom, anchor.position.y * zoom, 4, 0, Math.PI * 2);
+      renderer.fill('#ffffff');
+      renderer.stroke('#2563eb', 1);
+    }
+    if (visual.closeCandidate && anchors[0] !== undefined) {
+      renderer.beginPath();
+      renderer.arc(anchors[0].position.x * zoom, anchors[0].position.y * zoom, 7, 0, Math.PI * 2);
+      renderer.stroke('#2563eb', 2);
+    }
+    renderer.restore();
+  }
+
+  private appendPenPreviewSegment(
+    renderer: IRenderer,
+    start: CompletedPathInput['anchors'][number],
+    end: CompletedPathInput['anchors'][number],
+    zoom: number,
+  ): void {
+    const straight =
+      start.outgoingControl.x === 0 &&
+      start.outgoingControl.y === 0 &&
+      end.incomingControl.x === 0 &&
+      end.incomingControl.y === 0;
+    if (straight) {
+      renderer.lineTo(end.position.x * zoom, end.position.y * zoom);
+      return;
+    }
+    renderer.bezierCurveTo(
+      (start.position.x + start.outgoingControl.x) * zoom,
+      (start.position.y + start.outgoingControl.y) * zoom,
+      (end.position.x + end.incomingControl.x) * zoom,
+      (end.position.y + end.incomingControl.y) * zoom,
+      end.position.x * zoom,
+      end.position.y * zoom,
+    );
+  }
+
+  private renderPenHandles(
+    renderer: IRenderer,
+    anchor: CompletedPathInput['anchors'][number],
+    zoom: number,
+  ): void {
+    for (const control of [anchor.incomingControl, anchor.outgoingControl]) {
+      if (control.x === 0 && control.y === 0) continue;
+      const x = (anchor.position.x + control.x) * zoom;
+      const y = (anchor.position.y + control.y) * zoom;
+      renderer.beginPath();
+      renderer.moveTo(anchor.position.x * zoom, anchor.position.y * zoom);
+      renderer.lineTo(x, y);
+      renderer.stroke('#94a3b8', 1);
+      renderer.beginPath();
+      renderer.arc(x, y, 3, 0, Math.PI * 2);
+      renderer.fill('#ffffff');
+      renderer.stroke('#2563eb', 1);
+    }
   }
 
   private renderAlignmentGuides(
@@ -1768,7 +1972,10 @@ export class EditorShell extends Entity {
     }
 
     const activePointerId =
-      this.creationPointerId ?? this.resizePointerId ?? this.selectionPointerId;
+      this.penPointerId ??
+      this.creationPointerId ??
+      this.resizePointerId ??
+      this.selectionPointerId;
     if (this.cameraPointerId !== null && this.cameraPointerId !== pointerId) {
       if (event.type === 'pointerdown') this.quarantinedPointerIds.add(pointerId);
       return;
@@ -1781,6 +1988,13 @@ export class EditorShell extends Entity {
     if (event.type === 'pointercancel') {
       if (this.cameraPointerId === pointerId) {
         this.closeCameraPointer();
+        event.preventDefault();
+        return;
+      }
+      const penSession = this.penSession;
+      if (penSession !== null && this.penPointerId === pointerId) {
+        const effect = penSession.cancel({ kind: 'pointercancel', pointerId });
+        this.applyPenEffect(penSession, effect);
         event.preventDefault();
         return;
       }
@@ -1826,6 +2040,11 @@ export class EditorShell extends Entity {
       this.routeCameraPointer(event);
       return;
     }
+    const penSession = this.penSession;
+    if (this.activeTool === 'pen' && penSession !== null) {
+      this.routePenPointer(event, native, penSession);
+      return;
+    }
     const creationSession = this.creationSession;
     if (creationSession !== null && this.creationPointerId === pointerId) {
       this.routeCreationPointer(event, native, creationSession);
@@ -1864,6 +2083,36 @@ export class EditorShell extends Entity {
       if (this.selectionSession !== session) return;
       this.closeSelectionSession(session);
       this.selectionInterpreter.apply(effect);
+      event.preventDefault();
+    }
+  }
+
+  private routePenPointer(
+    event: VectoJSEvent,
+    native: NativePointerSnapshot,
+    session: PenPathSession,
+  ): void {
+    const sampled = this.penSample(event, native);
+    if (!sampled.ok) {
+      const effect = session.fail(sampled.error);
+      if (this.penSession !== session) return;
+      if (event.type !== 'pointerup') this.quarantinedPointerIds.add(native.pointerId);
+      this.applyPenEffect(session, effect);
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointermove') {
+      const effect = session.update(sampled.value);
+      if (this.penSession !== session) return;
+      this.applyPenEffect(session, effect);
+      event.preventDefault();
+      return;
+    }
+    if (event.type === 'pointerup') {
+      const effect = session.finishAnchor(sampled.value, { doubleClick: native.detail >= 2 });
+      if (this.penSession !== session) return;
+      this.penPointerId = null;
+      this.applyPenEffect(session, effect);
       event.preventDefault();
     }
   }
@@ -1965,7 +2214,10 @@ export class EditorShell extends Entity {
     }
     if (!this.authoringEnabled) return;
     const activePointerId =
-      this.creationPointerId ?? this.resizePointerId ?? this.selectionPointerId;
+      this.penPointerId ??
+      this.creationPointerId ??
+      this.resizePointerId ??
+      this.selectionPointerId;
     if (activePointerId !== null) {
       if (activePointerId !== pointerId) this.quarantinedPointerIds.add(pointerId);
       return;
@@ -1978,6 +2230,35 @@ export class EditorShell extends Entity {
     const sampled = this.selectionSample(event, native);
     if (!sampled.ok) {
       this.rejectPointer(pointerId, sampled.error);
+      return;
+    }
+
+    if (this.activeTool === 'pen') {
+      const penSample: PenPointerSample = Object.freeze({
+        pointerId,
+        viewportPoint: sampled.value.viewportPoint,
+        pagePoint: sampled.value.pagePoint,
+      });
+      const session = this.penSession;
+      if (session === null) {
+        const begun = PenPathSession.begin(penSample);
+        if (!begun.ok) {
+          this.rejectPointer(pointerId, begun.error);
+          return;
+        }
+        this.penSession = begun.value;
+        this.penPointerId = pointerId;
+        this.penVisual = snapshotPenVisual(begun.value.snapshot());
+        this.terminalInteraction = null;
+      } else {
+        const effect = session.beginAnchor(penSample);
+        if (this.penSession !== session) return;
+        this.penPointerId = effect.kind === 'preview' ? pointerId : null;
+        this.applyPenEffect(session, effect);
+      }
+      this.closeContextMenu();
+      this.scene?.markDirty();
+      event.preventDefault();
       return;
     }
 
@@ -2156,6 +2437,7 @@ export class EditorShell extends Entity {
     let altKey: boolean | undefined;
     let ctrlKey: boolean | undefined;
     let metaKey: boolean | undefined;
+    let detail: number | undefined;
     try {
       button = source?.button;
     } catch {
@@ -2181,6 +2463,11 @@ export class EditorShell extends Entity {
     } catch {
       return pointerInvalid('/nativeEvent/metaKey', pointerId);
     }
+    try {
+      detail = source?.detail;
+    } catch {
+      return pointerInvalid('/nativeEvent/detail', pointerId);
+    }
     return Object.freeze({
       ok: true,
       value: Object.freeze({
@@ -2190,6 +2477,7 @@ export class EditorShell extends Entity {
         altKey: altKey ?? false,
         ctrlKey: ctrlKey ?? false,
         metaKey: metaKey ?? false,
+        detail: detail ?? 0,
       }),
     });
   }
@@ -2206,6 +2494,15 @@ export class EditorShell extends Entity {
     const terminal = event.type === 'pointerup' || event.type === 'pointercancel';
     if (this.quarantinedPointerIds.has(pointerId)) {
       if (terminal) this.quarantinedPointerIds.delete(pointerId);
+      return;
+    }
+
+    const penSession = this.penSession;
+    if (penSession !== null && this.penPointerId === pointerId) {
+      const effect = penSession.fail(failure.error);
+      if (!terminal) this.quarantinedPointerIds.add(pointerId);
+      this.applyPenEffect(penSession, effect);
+      event.preventDefault();
       return;
     }
 
@@ -2282,6 +2579,25 @@ export class EditorShell extends Entity {
         pagePoint: sampled.value.pagePoint,
         shiftKey: native.shiftKey,
         altKey: native.altKey,
+      }),
+    };
+  }
+
+  private penSample(
+    event: VectoJSEvent,
+    native: Readonly<{ pointerId: number }>,
+  ): Result<PenPointerSample> {
+    const sampled = this.selectionSample(event, {
+      pointerId: native.pointerId,
+      shiftKey: false,
+    });
+    if (!sampled.ok) return sampled;
+    return {
+      ok: true,
+      value: Object.freeze({
+        pointerId: native.pointerId,
+        viewportPoint: sampled.value.viewportPoint,
+        pagePoint: sampled.value.pagePoint,
       }),
     };
   }
@@ -2434,6 +2750,36 @@ export class EditorShell extends Entity {
     return true;
   }
 
+  private closePenSession(expected: PenPathSession): boolean {
+    if (this.penSession !== expected) return false;
+    const terminal = expected.snapshot();
+    this.penSession = null;
+    this.penPointerId = null;
+    this.penVisual = null;
+    this.terminalInteraction = terminal.phase === 'terminal' ? terminal : null;
+    return true;
+  }
+
+  private applyPenEffect(session: PenPathSession, effect: PenPathEffect): void {
+    if (effect.kind === 'ignore') return;
+    if (effect.kind === 'preview') {
+      this.penVisual = snapshotPenVisual(effect.visual);
+      this.scene?.markDirty();
+      return;
+    }
+    if (!this.closePenSession(session)) return;
+    if (effect.kind === 'commit') {
+      const result = this.ports.createPath(
+        Object.freeze({ anchors: effect.network, closed: effect.closed }),
+      );
+      if (result.ok) this.refreshDocumentState();
+      else this.ports.reportInteractionError(result.error);
+      return;
+    }
+    if (effect.reason === 'error') this.ports.reportInteractionError(effect.error);
+    this.scene?.markDirty();
+  }
+
   private closeCreationSession(expected: CreationGestureSession): boolean {
     if (this.creationSession !== expected) return false;
     const terminal = expected.snapshot();
@@ -2479,8 +2825,14 @@ export class EditorShell extends Entity {
     // A tool switch is a transactional boundary: no preview owned by the old
     // tool may remain visible or accept a late terminal pointer event.
     this.pointerRouteVersion += 1;
-    const creationSession = this.creationSession;
-    if (creationSession !== null) {
+    const penSession = this.penSession;
+    if (penSession !== null) {
+      const pointerId = this.penPointerId;
+      const effect = penSession.cancel({ kind: 'tool-change' });
+      this.applyPenEffect(penSession, effect);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+    } else if (this.creationSession !== null) {
+      const creationSession = this.creationSession;
       const pointerId = this.creationPointerId;
       const effect = creationSession.cancel({ kind: 'tool-change' });
       this.closeCreationSession(creationSession);
@@ -2526,6 +2878,26 @@ export class EditorShell extends Entity {
       this.closeContextMenu();
       event.preventDefault();
       event.stopPropagation();
+      return;
+    }
+    if (event.key === 'Escape' && this.penSession !== null) {
+      const session = this.penSession;
+      const pointerId = this.penPointerId;
+      const effect = session.cancel({ kind: 'escape' });
+      this.applyPenEffect(session, effect);
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === 'Enter' && this.penSession !== null) {
+      const session = this.penSession;
+      const effect = session.commitOpen();
+      if (effect.kind !== 'ignore') {
+        this.applyPenEffect(session, effect);
+        event.preventDefault();
+        event.stopPropagation();
+      }
       return;
     }
     if (event.key === 'Escape' && this.creationSession !== null) {
@@ -2582,6 +2954,9 @@ export class EditorShell extends Entity {
       case 'tool-text':
         this.activateTool('text');
         return;
+      case 'tool-pen':
+        this.activateTool('pen');
+        return;
     }
     if (action === 'undo' || action === 'redo') {
       const result = this.ports.runHistory(action);
@@ -2596,6 +2971,12 @@ export class EditorShell extends Entity {
     if (!this.authoringEnabled) {
       this.closeContextMenu();
       return;
+    }
+    if (this.penSession !== null) {
+      const session = this.penSession;
+      const pointerId = this.penPointerId;
+      this.applyPenEffect(session, session.cancel({ kind: 'tool-change' }));
+      if (pointerId !== null) this.quarantinedPointerIds.add(pointerId);
     }
     const viewport = this.viewportSample(event);
     const sceneX = event.sceneX;
