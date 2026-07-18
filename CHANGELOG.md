@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a VectoJS-native Pen tool for straight and cubic open/closed contours,
+  including symmetric click-drag handles, live anchor/control previews, first-
+  anchor closure, Enter commit, Escape and competing-route cancellation,
+  detached diagnostics, and atomic Core history across Chromium, Firefox,
+  high-DPR rendering, and emulated page scale.
+- Upgraded to Brings Core 0.15.0 and added renderer-independent Path drawing,
+  selection outlines, layers, transforms, grouping, deletion, and history
+  through the published vector-network contract.
 - Added a canvas-native editor context menu with right-click selection,
   Select all, Group/Ungroup, Delete, nested Arrange commands, matching keyboard
   shortcuts, one-command history, and full-chain overlay dismissal.

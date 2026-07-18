@@ -15,7 +15,7 @@ The application provides a professional responsive editor shell with a local
 document status bar, fixed desktop Pages/Layers and Properties panels, a
 viewport-owned creation dock, and navigation-only authoring controls on narrow
 screens. It owns a Core-backed document session with Frame, Rectangle, Ellipse,
-and Text creation, ordered layers, selected-node properties, grouping,
+Text, and Path creation, ordered layers, selected-node properties, grouping,
 frontmost canvas selection, camera pan/zoom, and local undo/redo history.
 Frame, Rectangle, and Ellipse tools use one transactional creation session:
 click retains the documented default size, drag defines explicit page bounds,
@@ -32,15 +32,20 @@ interaction ownership out of Core. The focusable VMT design region routes
 Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, and Ctrl+Y to transactional Core undo/redo.
 Delete and Backspace atomically delete the normalized selection as one Core
 command, with selection restoration on undo and native-editor yielding for
-every shortcut. Unmodified V, F, R, O, and T switch the canvas-native Select,
-Frame, Rectangle, Ellipse, and Text tools while native editors retain their keys.
+every shortcut. The canvas-native Pen tool adds straight or cubic anchors
+without mutating the document during a draft. Click creates corners, click-drag
+creates symmetric handles, clicking the first of at least three anchors closes
+the contour, Enter commits an open contour, and Escape discards it. A successful
+terminal gesture creates and selects one Core Path through one undoable command.
+Unmodified V, F, R, O, P, and T switch the canvas-native Select, Frame,
+Rectangle, Ellipse, Pen, and Text tools while native editors retain their keys.
 Right-click opens a canvas-native command surface after resolving the frontmost
 Core selection. Select all, nested Arrange, Group/Ungroup, and Delete share the
 same controller commands as Ctrl/Cmd+A, bracket ordering shortcuts,
 Ctrl/Cmd+G, Ctrl/Cmd+Shift+G, and Delete; outside click or Escape closes the
 entire overlay chain without changing document history.
 
-The app consumes exact published `@vectojs/brings-core@0.14.0`,
+The app consumes exact published `@vectojs/brings-core@0.15.0`,
 `@vectojs/core@1.11.1`, `@vectojs/ui@1.11.3`, and
 `@vectojs/devtools@0.4.3` registry dependencies, never local workspace links.
 Interaction slices render and mutate only Core-owned state.
