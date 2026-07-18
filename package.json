@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@vectojs/brings-core": "0.15.0",
-    "@vectojs/core": "1.11.1",
+    "@vectojs/core": "1.11.3",
     "@vectojs/ui": "1.11.3"
   },
   "devDependencies": {
