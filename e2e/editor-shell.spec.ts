@@ -99,6 +99,18 @@ type BrowserDebugApi = Readonly<{
   interactionErrors: () => readonly Readonly<{ code: string; path: string }>[];
   trace: () => readonly BrowserTraceEntry[];
   camera: () => BrowserCamera;
+  contextMenu: () => Readonly<{
+    visible: boolean;
+    x: number | null;
+    y: number | null;
+    commands: Readonly<{
+      canDelete: boolean;
+      canBringForward: boolean;
+      canBringFront: boolean;
+      canSendBackward: boolean;
+      canSendBack: boolean;
+    }>;
+  }>;
 }>;
 
 async function readDebug(page: Page): Promise<
@@ -2252,4 +2264,101 @@ test('discards resize on Escape, pointercancel, and a narrow responsive transiti
   await page.keyboard.press('Escape');
   await page.mouse.up();
   expect((await readDebug(page)).snapshot).toEqual(durable);
+});
+
+test('opens the canvas-native context menu, arranges one sibling, and closes the full submenu chain', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+  const [firstFrame, secondFrame] = await createTwoFramesAndSelectFirst(
+    page,
+    { x: 100, y: 120 },
+    { x: 620, y: 120 },
+  );
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+
+  await canvas.click({ button: 'right', position: { x: 140, y: 160 } });
+  await expect(page.getByRole('menu', { name: 'Context menu' })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => Reflect.get(window, '__brings').contextMenu()))
+    .toMatchObject({
+      visible: true,
+      commands: { canBringForward: true, canBringFront: true, canSendBackward: false },
+    });
+
+  const rootMenu = page.getByRole('menu', { name: 'Context menu' }).first();
+  await rootMenu.click({ position: { x: 48, y: 61 } });
+  await expect(page.getByRole('menu', { name: 'Context menu' })).toHaveCount(2);
+  const submenu = page.getByRole('menu', { name: 'Context menu' }).last();
+  await submenu.click({ position: { x: 48, y: 52 } });
+
+  await expect(rootMenu).toBeHidden();
+  await expect(submenu).toBeHidden();
+  await expect
+    .poll(() => page.evaluate(() => Reflect.get(window, '__brings').contextMenu()))
+    .toMatchObject({ visible: false });
+  const arranged = await readDebug(page);
+  const rootOrder = await page.evaluate(() => {
+    const snapshot = Reflect.get(window, '__brings').snapshot();
+    return snapshot.document.pages[0]?.rootNodeIds;
+  });
+  expect(rootOrder).toEqual([secondFrame.id, firstFrame.id]);
+  expect(arranged.snapshot).toMatchObject({ undoDepth: 3, redoDepth: 0 });
+  expect(arranged.interactionErrors).toEqual([]);
+});
+
+test('dismisses the context menu with Escape or outside click and executes Delete from the shared command surface', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?debug');
+  await page.waitForFunction(() => Reflect.has(window, '__brings'));
+  const frame = await createAndSelectFrame(page, { x: 100, y: 120 });
+  const canvas = page.getByRole('region', { name: 'Design canvas' });
+
+  await canvas.click({ button: 'right', position: { x: 140, y: 160 } });
+  await expect(page.getByRole('menu', { name: 'Context menu' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu', { name: 'Context menu' })).toHaveCount(0);
+
+  await canvas.click({ button: 'right', position: { x: 140, y: 160 } });
+  const outsideDismissedMenu = page.getByRole('menu', { name: 'Context menu' });
+  await expect(outsideDismissedMenu).toBeVisible();
+  const outsideState = await page.evaluate(() => {
+    const backdrop = document.querySelector<HTMLElement>('[data-vecto-id$="-backdrop"]');
+    const menu = document.querySelector<HTMLElement>('[role="menu"]');
+    const region = document.querySelector<HTMLElement>('[data-vecto-id="brings-canvas-region"]');
+    return {
+      hit: document.elementFromPoint(1000, 700)?.getAttribute('data-vecto-id'),
+      backdrop: backdrop
+        ? { id: backdrop.getAttribute('data-vecto-id'), zIndex: backdrop.style.zIndex }
+        : null,
+      menuZIndex: menu?.style.zIndex ?? null,
+      regionZIndex: region?.style.zIndex ?? null,
+    };
+  });
+  expect(outsideState.hit, JSON.stringify(outsideState)).toMatch(/^context-menu-\d+-backdrop$/);
+  await page.mouse.click(1000, 700);
+  await expect
+    .poll(() => page.evaluate(() => Reflect.get(window, '__brings').contextMenu()))
+    .toMatchObject({ visible: false });
+  await expect(outsideDismissedMenu).toBeHidden();
+  expect((await readDebug(page)).snapshot.selection.activeNodeId).toBe(frame.id);
+
+  await canvas.click({ button: 'right', position: { x: 140, y: 160 } });
+  const menu = page.getByRole('menu', { name: 'Context menu' });
+  await expect(menu).toBeVisible();
+  await menu.click({ position: { x: 48, y: 175 } });
+
+  await expect(menu).toBeHidden();
+  const afterDelete = await readDebug(page);
+  expect(afterDelete.snapshot.document.nodes.some((node) => node.id === frame.id)).toBe(false);
+  expect(afterDelete.snapshot).toMatchObject({
+    selection: { nodeIds: [], activeNodeId: null },
+    undoDepth: 2,
+    redoDepth: 0,
+  });
+  expect(afterDelete.interactionErrors).toEqual([]);
 });

@@ -273,14 +273,23 @@ function dispatchPointer(
   return event;
 }
 
-function dispatchShortcut(shell: EditorShell, key: string): VectoJSEvent {
+function dispatchShortcut(
+  shell: EditorShell,
+  key: string,
+  modifiers: Readonly<{
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    altKey?: boolean;
+    shiftKey?: boolean;
+  }> = {},
+): VectoJSEvent {
   const canvas = childById(shell, 'brings-canvas-region');
   const event = new VectoJSEvent('keydown', canvas, {
     key,
-    ctrlKey: false,
-    metaKey: false,
-    altKey: false,
-    shiftKey: false,
+    ctrlKey: modifiers.ctrlKey ?? false,
+    metaKey: modifiers.metaKey ?? false,
+    altKey: modifiers.altKey ?? false,
+    shiftKey: modifiers.shiftKey ?? false,
     target: { tagName: 'CANVAS' },
     preventDefault: () => undefined,
   });
@@ -971,6 +980,71 @@ test('routes unmodified deletion from the focused VMT design region', () => {
   expect(deleteCalls).toBe(1);
   expect(prevented).toBe(true);
   expect(event.propagationStopped).toBe(true);
+});
+
+test('routes selection and arrange chords through the shared document command ports', () => {
+  const calls: string[] = [];
+  const success = { ok: true as const, value: editorSnapshot([first]) };
+  const shell = new EditorShell(1440, 900, {
+    selectAll: () => {
+      calls.push('select-all');
+      return success;
+    },
+    arrangeSelection: (action) => {
+      calls.push(action);
+      return success;
+    },
+  });
+
+  dispatchShortcut(shell, 'a', { ctrlKey: true });
+  dispatchShortcut(shell, ']');
+  dispatchShortcut(shell, ']', { metaKey: true });
+  dispatchShortcut(shell, '[');
+  dispatchShortcut(shell, '[', { ctrlKey: true });
+
+  expect(calls).toEqual(['select-all', 'forward', 'front', 'backward', 'back']);
+});
+
+test('routes secondary pointer selection before deriving the context command surface', () => {
+  const points: Array<Readonly<{ x: number; y: number }>> = [];
+  const selectedSnapshot = editorSnapshot([first]);
+  const shell = new EditorShell(1440, 900, {
+    documentSnapshot: () => selectedSnapshot,
+    selectAt: (x, y) => {
+      points.push({ x, y });
+      return { ok: true, value: selectedSnapshot };
+    },
+  });
+
+  const event = dispatchPointer(shell, 'pointerdown', {
+    pointerId: 901,
+    x: 45,
+    y: 65,
+    button: 2,
+  });
+
+  expect(points).toEqual([{ x: 45, y: 65 }]);
+  expect(event.propagationStopped).toBe(true);
+  expect(event.defaultPrevented).toBe(false);
+  expect(shell.contextMenuSnapshot()).toMatchObject({
+    visible: false,
+    commands: { canDelete: true, canUngroup: false },
+  });
+});
+
+test('does not open or select from a secondary pointer on narrow viewports', () => {
+  let selectionCalls = 0;
+  const shell = new EditorShell(390, 600, {
+    selectAt: () => {
+      selectionCalls += 1;
+      return { ok: true, value: editorSnapshot([first]) };
+    },
+  });
+
+  dispatchPointer(shell, 'pointerdown', { pointerId: 902, x: 20, y: 30, button: 2 });
+
+  expect(selectionCalls).toBe(0);
+  expect(shell.contextMenuSnapshot().visible).toBe(false);
 });
 
 test('yields modified deletion keys without consuming the focused VMT event', () => {

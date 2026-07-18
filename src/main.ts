@@ -16,6 +16,7 @@ declare global {
       trace: () => readonly import('@vectojs/devtools/headless').EventTraceEntry[];
       interaction: () => EditorInteractionSnapshot;
       camera: () => ReturnType<EditorShell['cameraSnapshot']>;
+      contextMenu: () => ReturnType<EditorShell['contextMenuSnapshot']>;
       interactionErrors: () => readonly import('@vectojs/brings-core').BringsError[];
       undo: () => import('@vectojs/brings-core').Result<
         import('@vectojs/brings-core').EditorSnapshot
@@ -42,6 +43,8 @@ scene.renderMode = 'onDemand';
 const editor = new BringsEditorController(() => crypto.randomUUID());
 const shell = new EditorShell(1, 1, {
   documentSnapshot: () => editor.snapshot(),
+  selectAt: (x, y) => editor.selectAt(x, y),
+  selectAll: () => editor.selectAll(),
   selectLayer: (nodeIds, activeNodeId) => editor.setLayerSelection(nodeIds, activeNodeId),
   setLayerVisibility: (nodeId) => editor.toggleLayerVisibility(nodeId),
   setSelectionProperties: (patch) => editor.setSelectionProperties(patch),
@@ -82,6 +85,7 @@ const shell = new EditorShell(1, 1, {
   deleteSelection: () => editor.deleteSelection(),
   groupSelection: () => editor.groupSelection(),
   ungroupSelection: () => editor.ungroupSelection(),
+  arrangeSelection: (action) => editor.arrangeSelection(action),
 });
 scene.add(shell);
 
@@ -96,6 +100,11 @@ const observer = new ResizeObserver(resize);
 observer.observe(root);
 resize();
 scene.start();
+
+// Core routes the secondary pointer through VectoJS; this capture listener only
+// suppresses the browser-owned menu after the canvas-native command surface opens.
+const preventNativeContextMenu = (event: Event): void => event.preventDefault();
+root.addEventListener('contextmenu', preventNativeContextMenu, { capture: true });
 
 let destroyed = false;
 let destroyDebug = (): void => {};
@@ -121,6 +130,7 @@ if (debugMode) {
         trace: () => trace.entries,
         interaction: () => shell.interactionSnapshot(),
         camera: () => shell.cameraSnapshot(),
+        contextMenu: () => shell.contextMenuSnapshot(),
         interactionErrors: () => interactionErrors.read(),
         undo: () => {
           const result = editor.undo();
@@ -155,6 +165,7 @@ window.addEventListener(
     destroyed = true;
     destroyDebug();
     observer.disconnect();
+    root.removeEventListener('contextmenu', preventNativeContextMenu, { capture: true });
     scene.destroy();
   },
   { once: true },

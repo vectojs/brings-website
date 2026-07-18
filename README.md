@@ -34,10 +34,15 @@ Delete and Backspace atomically delete the normalized selection as one Core
 command, with selection restoration on undo and native-editor yielding for
 every shortcut. Unmodified V, F, R, O, and T switch the canvas-native Select,
 Frame, Rectangle, Ellipse, and Text tools while native editors retain their keys.
+Right-click opens a canvas-native command surface after resolving the frontmost
+Core selection. Select all, nested Arrange, Group/Ungroup, and Delete share the
+same controller commands as Ctrl/Cmd+A, bracket ordering shortcuts,
+Ctrl/Cmd+G, Ctrl/Cmd+Shift+G, and Delete; outside click or Escape closes the
+entire overlay chain without changing document history.
 
 The app consumes exact published `@vectojs/brings-core@0.14.0`,
-`@vectojs/core@1.9.1`, `@vectojs/ui@1.9.1`, and
-`@vectojs/devtools@0.4.2` registry dependencies, never local workspace links.
+`@vectojs/core@1.11.1`, `@vectojs/ui@1.11.3`, and
+`@vectojs/devtools@0.4.3` registry dependencies, never local workspace links.
 Interaction slices render and mutate only Core-owned state.
 
 ## Development

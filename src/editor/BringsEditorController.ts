@@ -43,6 +43,9 @@ import type {
 /** Caller-owned allocation boundary for document and initial-page identities. */
 export type UuidFactory = () => string;
 
+/** One deterministic same-parent paint-order command. */
+export type ArrangeAction = 'forward' | 'backward' | 'front' | 'back';
+
 /** One canvas Layers row derived directly from the active Core document page. */
 export type BringsLayerItem = Readonly<{
   id: NodeId;
@@ -275,6 +278,72 @@ export class BringsEditorController {
   ): Result<EditorSnapshot> {
     const before = this.store.snapshot().selection;
     return this.finishOperation(before, this.store.setSelection({ nodeIds, activeNodeId }));
+  }
+
+  /** Select every active-page root without creating a durable history entry. */
+  public selectAll(): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    const page = snapshot.document.pages.find(
+      (candidate) => candidate.id === snapshot.document.activePageId,
+    );
+    if (page === undefined) return this.failure('page.not-found', '/activePageId');
+    const nodeIds = [...page.rootNodeIds];
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.setSelection({
+        nodeIds,
+        activeNodeId: nodeIds.at(-1) ?? null,
+      }),
+    );
+  }
+
+  /** Move the one selected sibling in paint order as exactly one Core command. */
+  public arrangeSelection(action: ArrangeAction): Result<EditorSnapshot> {
+    const snapshot = this.store.snapshot();
+    if (snapshot.selection.nodeIds.length !== 1 || snapshot.selection.activeNodeId === null) {
+      return this.failure('selection.single-required', '/nodeIds');
+    }
+    const node = snapshot.document.nodes.find(
+      (candidate) => candidate.id === snapshot.selection.activeNodeId,
+    );
+    if (node === undefined) return this.failure('node.not-found', '/nodeIds');
+    const page = snapshot.document.pages.find(
+      (candidate) => candidate.id === snapshot.document.activePageId,
+    );
+    if (page === undefined) return this.failure('page.not-found', '/activePageId');
+    const parent =
+      node.parentId === null
+        ? undefined
+        : snapshot.document.nodes.find((candidate) => candidate.id === node.parentId);
+    const siblings =
+      node.parentId === null
+        ? page.rootNodeIds
+        : parent?.type === 'frame' || parent?.type === 'group'
+          ? parent.childIds
+          : undefined;
+    if (siblings === undefined) return this.failure('node.parent-invalid', '/parentId');
+    const currentIndex = siblings.indexOf(node.id);
+    if (currentIndex === -1) return this.failure('node.parent-invalid', '/parentId');
+    const remainingLength = siblings.length - 1;
+    const destination =
+      action === 'front'
+        ? remainingLength
+        : action === 'back'
+          ? 0
+          : action === 'forward'
+            ? Math.min(remainingLength, currentIndex + 1)
+            : Math.max(0, currentIndex - 1);
+    if (destination === currentIndex) return this.failure('arrange.edge', '/selection');
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.execute({
+        kind: 'move-nodes',
+        nodeIds: [node.id],
+        pageId: page.id,
+        parentId: node.parentId,
+        index: destination,
+      }),
+    );
   }
 
   /** Apply one Core-compatible patch to the normalized current selection. */

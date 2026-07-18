@@ -8,6 +8,7 @@ import {
   type VectoJSEvent,
 } from '@vectojs/core';
 import { Input } from '@vectojs/ui/input';
+import { ContextMenu, type ContextMenuItem } from '@vectojs/ui/context-menu';
 import type {
   AlignmentGuide,
   BringsError,
@@ -37,6 +38,7 @@ import type {
 } from '../editor/selectionInteraction';
 import { type EditorLayout, resolveEditorLayout } from './layout';
 import { isNativeEditorTarget, resolveEditorShortcut } from './editorShortcuts';
+import { deriveEditorCommandState, type EditorCommandState } from './editorContextMenu';
 import {
   MarqueeSelectionSession,
   type SelectionGestureSessionSnapshot,
@@ -430,6 +432,10 @@ function snapshotVisual(visual: SelectionGestureVisual | null): SelectionGesture
 
 export interface EditorShellPorts {
   readonly documentSnapshot?: () => EditorSnapshot;
+  /** Select the topmost node at one page-space point without adding history. */
+  readonly selectAt?: (x: number, y: number) => Result<EditorSnapshot>;
+  /** Select every root on the active page without adding history. */
+  readonly selectAll?: () => Result<EditorSnapshot>;
   /** Select a layer without introducing an undoable document change. */
   readonly selectLayer?: (
     nodeIds: readonly string[],
@@ -468,10 +474,15 @@ export interface EditorShellPorts {
   readonly deleteSelection?: () => Result<EditorSnapshot>;
   readonly groupSelection?: () => Result<EditorSnapshot>;
   readonly ungroupSelection?: () => Result<EditorSnapshot>;
+  readonly arrangeSelection?: (
+    action: 'forward' | 'backward' | 'front' | 'back',
+  ) => Result<EditorSnapshot>;
 }
 
 type ResolvedEditorShellPorts = Readonly<{
   documentSnapshot: () => EditorSnapshot;
+  selectAt: (x: number, y: number) => Result<EditorSnapshot>;
+  selectAll: () => Result<EditorSnapshot>;
   selectLayer: (nodeIds: readonly string[], activeNodeId: string | null) => Result<EditorSnapshot>;
   setLayerVisibility: (nodeId: string) => Result<EditorSnapshot>;
   setSelectionProperties: (patch: NodePropertyPatchInput) => Result<EditorSnapshot>;
@@ -502,6 +513,7 @@ type ResolvedEditorShellPorts = Readonly<{
   deleteSelection: () => Result<EditorSnapshot>;
   groupSelection: () => Result<EditorSnapshot>;
   ungroupSelection: () => Result<EditorSnapshot>;
+  arrangeSelection: (action: 'forward' | 'backward' | 'front' | 'back') => Result<EditorSnapshot>;
 }>;
 
 const DEFAULT_DOCUMENT_SNAPSHOT = (): EditorSnapshot => ({
@@ -528,6 +540,8 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   ResolvedEditorShellPorts,
   'documentSnapshot' | 'beginSelectionInteraction'
 > = {
+  selectAt: () => unavailable('selection.unavailable'),
+  selectAll: () => unavailable('selection.unavailable'),
   selectLayer: () => unavailable('layer.selection-unavailable'),
   setLayerVisibility: () => unavailable('layer.visibility-unavailable'),
   setSelectionProperties: () => unavailable('properties.unavailable'),
@@ -558,12 +572,15 @@ const DEFAULT_EDITOR_SHELL_PORTS: Omit<
   deleteSelection: () => unavailable('selection.delete-unavailable'),
   groupSelection: () => unavailable('selection.group-unavailable'),
   ungroupSelection: () => unavailable('selection.ungroup-unavailable'),
+  arrangeSelection: () => unavailable('selection.arrange-unavailable'),
 };
 
 function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPorts {
   const documentSnapshot = ports.documentSnapshot ?? DEFAULT_DOCUMENT_SNAPSHOT;
   return {
     documentSnapshot,
+    selectAt: ports.selectAt ?? DEFAULT_EDITOR_SHELL_PORTS.selectAt,
+    selectAll: ports.selectAll ?? DEFAULT_EDITOR_SHELL_PORTS.selectAll,
     selectLayer: ports.selectLayer ?? DEFAULT_EDITOR_SHELL_PORTS.selectLayer,
     setLayerVisibility: ports.setLayerVisibility ?? DEFAULT_EDITOR_SHELL_PORTS.setLayerVisibility,
     setSelectionProperties:
@@ -599,8 +616,16 @@ function resolveEditorShellPorts(ports: EditorShellPorts): ResolvedEditorShellPo
     deleteSelection: ports.deleteSelection ?? DEFAULT_EDITOR_SHELL_PORTS.deleteSelection,
     groupSelection: ports.groupSelection ?? DEFAULT_EDITOR_SHELL_PORTS.groupSelection,
     ungroupSelection: ports.ungroupSelection ?? DEFAULT_EDITOR_SHELL_PORTS.ungroupSelection,
+    arrangeSelection: ports.arrangeSelection ?? DEFAULT_EDITOR_SHELL_PORTS.arrangeSelection,
   };
 }
+
+export type EditorContextMenuSnapshot = Readonly<{
+  visible: boolean;
+  x: number | null;
+  y: number | null;
+  commands: EditorCommandState;
+}>;
 
 /** A compact Figma-style row; all changes remain routed through the controller ports. */
 class LayerRow extends Entity {
@@ -935,6 +960,10 @@ export class EditorShell extends Entity {
   private cameraPointerId: number | null = null;
   private cameraLastViewportPoint: Readonly<{ x: number; y: number }> | null = null;
   private spacePanHeld = false;
+  private contextMenu: ContextMenu | null = null;
+  private contextMenuCommands: EditorCommandState = deriveEditorCommandState(
+    DEFAULT_DOCUMENT_SNAPSHOT(),
+  );
 
   public constructor(width = 1, height = 1, ports: EditorShellPorts = {}) {
     super('brings-editor-shell');
@@ -1055,6 +1084,16 @@ export class EditorShell extends Entity {
     });
   }
 
+  /** Read detached context-menu state for automation without reaching into UI internals. */
+  public contextMenuSnapshot(): EditorContextMenuSnapshot {
+    return Object.freeze({
+      visible: this.contextMenu?.visible ?? false,
+      x: this.contextMenu?.x ?? null,
+      y: this.contextMenu?.y ?? null,
+      commands: Object.freeze({ ...this.contextMenuCommands }),
+    });
+  }
+
   /** Read detached camera state for debugging and deterministic browser verification. */
   public cameraSnapshot(): Readonly<{ center: Readonly<{ x: number; y: number }>; zoom: number }> {
     return Object.freeze({
@@ -1083,6 +1122,7 @@ export class EditorShell extends Entity {
 
   public resize(width: number, height: number): void {
     if (this.authoringEnabled && width < 600) {
+      this.closeContextMenu();
       if (this.creationSession !== null) {
         const session = this.creationSession;
         const pointerId = this.creationPointerId;
@@ -1908,6 +1948,10 @@ export class EditorShell extends Entity {
     routeVersion: number,
   ): void {
     const pointerId = native.pointerId;
+    if (native.button === 2) {
+      this.routeContextMenu(event);
+      return;
+    }
     if (native.button === 1 || (native.button === 0 && this.spacePanHeld)) {
       const viewport = this.viewportSample(event);
       if (!viewport.ok) {
@@ -2430,6 +2474,8 @@ export class EditorShell extends Entity {
   private activateTool(tool: CanvasTool): void {
     if (tool === this.activeTool) return;
 
+    this.closeContextMenu();
+
     // A tool switch is a transactional boundary: no preview owned by the old
     // tool may remain visible or accept a late terminal pointer event.
     this.pointerRouteVersion += 1;
@@ -2472,6 +2518,12 @@ export class EditorShell extends Entity {
       !this.shouldYieldNativeEditor(event)
     ) {
       this.spacePanHeld = true;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === 'Escape' && this.contextMenu?.visible === true) {
+      this.closeContextMenu();
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -2531,15 +2583,134 @@ export class EditorShell extends Entity {
         this.activateTool('text');
         return;
     }
+    if (action === 'undo' || action === 'redo') {
+      const result = this.ports.runHistory(action);
+      if (result.ok) this.refreshDocumentState();
+      return;
+    }
+    this.runDocumentCommand(action);
+  }
+
+  private routeContextMenu(event: VectoJSEvent): void {
+    event.stopPropagation();
+    if (!this.authoringEnabled) {
+      this.closeContextMenu();
+      return;
+    }
+    const viewport = this.viewportSample(event);
+    const sceneX = event.sceneX;
+    const sceneY = event.sceneY;
+    if (!viewport.ok || sceneX === undefined || sceneY === undefined) return;
+    const point = this.camera.pagePointAt(viewport.value);
+    const pagePoint = editorPagePoint(point.x, point.y);
+    if (!pagePoint.ok) return;
+
+    const selection = this.ports.selectAt(pagePoint.value.x, pagePoint.value.y);
+    if (selection.ok) this.refreshDocumentState(false);
+    this.contextMenuCommands = deriveEditorCommandState(this.ports.documentSnapshot());
+    this.closeContextMenu();
+
+    const scene = this.scene;
+    if (!scene) return;
+    const commands = this.contextMenuCommands;
+    const arrangeItems: ContextMenuItem[] = [
+      this.contextItem('Bring forward', ']', commands.canBringForward, 'bring-forward'),
+      this.contextItem('Bring to front', 'Ctrl+]', commands.canBringFront, 'bring-front'),
+      this.contextItem('Send backward', '[', commands.canSendBackward, 'send-backward'),
+      this.contextItem('Send to back', 'Ctrl+[', commands.canSendBack, 'send-back'),
+    ];
+    const menu = new ContextMenu({
+      width: 236,
+      font: '500 12px system-ui, sans-serif',
+      bg: '#202126',
+      color: '#f4f4f6',
+      disabledColor: '#71747e',
+      hoverBg: '#34363f',
+      borderColor: '#454852',
+      items: [
+        this.contextItem('Select all', 'Ctrl+A', commands.canSelectAll, 'select-all'),
+        { separator: true },
+        {
+          label: 'Arrange',
+          disabled: !arrangeItems.some((item) => item.disabled !== true),
+          children: arrangeItems,
+        },
+        { separator: true },
+        this.contextItem('Group selection', 'Ctrl+G', commands.canGroup, 'group'),
+        this.contextItem('Ungroup selection', 'Ctrl+Shift+G', commands.canUngroup, 'ungroup'),
+        { separator: true },
+        this.contextItem('Delete', 'Delete', commands.canDelete, 'delete'),
+      ],
+    });
+    this.contextMenu = menu;
+    scene.overlayRoot.add(menu);
+    menu.showAtPoint(sceneX, sceneY);
+  }
+
+  private contextItem(
+    label: string,
+    shortcut: string,
+    enabled: boolean,
+    action:
+      | 'select-all'
+      | 'delete'
+      | 'group'
+      | 'ungroup'
+      | 'bring-forward'
+      | 'bring-front'
+      | 'send-backward'
+      | 'send-back',
+  ): ContextMenuItem {
+    return {
+      label,
+      shortcut,
+      disabled: !enabled,
+      onClick: () => {
+        this.runDocumentCommand(action);
+      },
+    };
+  }
+
+  private runDocumentCommand(
+    action:
+      | 'select-all'
+      | 'delete'
+      | 'group'
+      | 'ungroup'
+      | 'bring-forward'
+      | 'bring-front'
+      | 'send-backward'
+      | 'send-back',
+  ): void {
     const result =
-      action === 'delete'
-        ? this.ports.deleteSelection()
-        : action === 'group'
-          ? this.ports.groupSelection()
-          : action === 'ungroup'
-            ? this.ports.ungroupSelection()
-            : this.ports.runHistory(action);
+      action === 'select-all'
+        ? this.ports.selectAll()
+        : action === 'delete'
+          ? this.ports.deleteSelection()
+          : action === 'group'
+            ? this.ports.groupSelection()
+            : action === 'ungroup'
+              ? this.ports.ungroupSelection()
+              : this.ports.arrangeSelection(
+                  action === 'bring-forward'
+                    ? 'forward'
+                    : action === 'bring-front'
+                      ? 'front'
+                      : action === 'send-backward'
+                        ? 'backward'
+                        : 'back',
+                );
     if (result.ok) this.refreshDocumentState();
+  }
+
+  private closeContextMenu(destroy = true): void {
+    const menu = this.contextMenu;
+    if (menu === null) return;
+    menu.hide();
+    if (destroy) {
+      menu.destroy();
+      this.contextMenu = null;
+    }
   }
 
   private routeCameraKeyUp(event: VectoJSEvent): void {
