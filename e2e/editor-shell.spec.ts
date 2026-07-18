@@ -668,6 +668,50 @@ test('commits open and closed Pen contours atomically and discards an escaped dr
     terminalEffect: 'discard',
     penVisual: null,
   });
+
+  await page.keyboard.press('v');
+  await canvas.click({ position: { x: 700, y: 700 } });
+  await canvas.click({ position: { x: 280, y: 258 } });
+  expect((await readDebug(page)).snapshot.selection.activeNodeId).toBe(paths[1]?.id);
+
+  const moveStart = await projectedPoint(page, { x: 280, y: 258 });
+  await page.mouse.move(moveStart.x, moveStart.y);
+  await page.mouse.down();
+  await page.mouse.move(moveStart.x + 20, moveStart.y + 10, { steps: 4 });
+  await page.mouse.up();
+  const moved = await readDebug(page);
+  const movedPath = moved.snapshot.document.nodes.find((node) => node.id === paths[1]?.id);
+  expect(movedPath?.transform).toEqual([1, 0, 0, 1, 20, 10]);
+  expect(moved.snapshot).toMatchObject({ document: { revision: 6 }, undoDepth: 4, redoDepth: 0 });
+
+  const localVertices = movedPath?.network?.vertices.map((vertex) => vertex.position) ?? [];
+  const maximumX = Math.max(...localVertices.map((point) => point.x));
+  const maximumY = Math.max(...localVertices.map((point) => point.y));
+  const resizeStart = await projectedPoint(page, {
+    x: (frame.transform[4] ?? 0) + (movedPath?.transform[4] ?? 0) + maximumX,
+    y: (frame.transform[5] ?? 0) + (movedPath?.transform[5] ?? 0) + maximumY,
+  });
+  await page.mouse.move(resizeStart.x, resizeStart.y);
+  await page.mouse.down();
+  await page.mouse.move(resizeStart.x + 20, resizeStart.y + 20, { steps: 4 });
+  expect((await readDebug(page)).interaction.phase).toBe('resizing');
+  await page.mouse.up();
+  const resized = await readDebug(page);
+  const resizedPath = resized.snapshot.document.nodes.find((node) => node.id === paths[1]?.id);
+  expect(resizedPath?.transform).not.toEqual(movedPath?.transform);
+  expect(resized.snapshot).toMatchObject({ document: { revision: 7 }, undoDepth: 5, redoDepth: 0 });
+
+  await page.keyboard.press('Delete');
+  const deleted = await readDebug(page);
+  expect(deleted.snapshot.document.nodes.some((node) => node.id === paths[1]?.id)).toBe(false);
+  expect(deleted.snapshot).toMatchObject({ document: { revision: 8 }, undoDepth: 6, redoDepth: 0 });
+  await page.keyboard.press('Control+z');
+  expect((await readDebug(page)).snapshot).toMatchObject({
+    document: { revision: 9, nodes: [{ type: 'frame' }, { type: 'path' }, { type: 'path' }] },
+    selection: { nodeIds: [paths[1]?.id], activeNodeId: paths[1]?.id },
+    undoDepth: 5,
+    redoDepth: 1,
+  });
   expect(escaped.interactionErrors).toEqual([]);
 });
 

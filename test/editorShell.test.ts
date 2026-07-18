@@ -2134,6 +2134,70 @@ test('renders and outlines transformed Path nodes through IRenderer path command
     args: ['rgba(46, 115, 242, 1)', 2],
   });
   expect(recording.calls).toContainEqual({ method: 'stroke', args: ['#2563eb', 2] });
+
+  const errors: Array<Readonly<{ code: string; path: string }>> = [];
+  const extraA = '99999999-9999-4999-8999-999999999999' as NodeId;
+  const extraB = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' as NodeId;
+  const extraC = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' as NodeId;
+  const evenOdd: EditorSnapshot = {
+    ...snapshot,
+    document: {
+      ...snapshot.document,
+      nodes: snapshot.document.nodes.map((node) =>
+        node.type === 'path'
+          ? {
+              ...node,
+              fillRule: 'evenodd',
+              network: {
+                vertices: [
+                  ...node.network.vertices,
+                  { id: extraA, position: { x: 30, y: 0 } },
+                  { id: extraB, position: { x: 50, y: 0 } },
+                  { id: extraC, position: { x: 40, y: 16 } },
+                ],
+                segments: [
+                  ...node.network.segments,
+                  {
+                    id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' as NodeId,
+                    startVertexId: extraA,
+                    endVertexId: extraB,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                  {
+                    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' as NodeId,
+                    startVertexId: extraB,
+                    endVertexId: extraC,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                  {
+                    id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' as NodeId,
+                    startVertexId: extraC,
+                    endVertexId: extraA,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                ],
+              },
+            }
+          : node,
+      ),
+    },
+  };
+  const unsupportedShell = new EditorShell(1440, 900, {
+    documentSnapshot: () => evenOdd,
+    reportInteractionError: (error) => errors.push(error),
+  });
+  const unsupportedRecording = recordingRenderer();
+  unsupportedShell.render(unsupportedRecording.renderer);
+  unsupportedShell.render(recordingRenderer().renderer);
+
+  expect(unsupportedRecording.calls).not.toContainEqual({
+    method: 'fill',
+    args: ['rgba(46, 115, 242, 0.3)'],
+  });
+  expect(errors).toEqual([{ code: 'render.fill-rule-unsupported', path: '/nodes/1/fillRule' }]);
 });
 
 test('composes scaled descendants and keeps selected movement in page space', () => {
