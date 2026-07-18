@@ -1962,6 +1962,86 @@ test('renders and outlines Ellipse nodes through renderer-independent cubic path
   expect(recording.calls).toContainEqual({ method: 'stroke', args: ['#2563eb', 2] });
 });
 
+test('renders and outlines transformed Path nodes through IRenderer path commands', () => {
+  const base = editorSnapshot([second]);
+  const snapshot: EditorSnapshot = {
+    ...base,
+    document: {
+      ...base.document,
+      nodes: base.document.nodes.map((node) =>
+        node.id === second
+          ? {
+              id: node.id,
+              name: 'Path',
+              parentId: node.parentId,
+              visible: true,
+              locked: false,
+              opacity: 1,
+              transform: [2, 0, 0, 1.5, 10, 12],
+              type: 'path',
+              network: {
+                vertices: [
+                  { id: third, position: { x: 0, y: 0 } },
+                  { id: fourth, position: { x: 20, y: 0 } },
+                  {
+                    id: '55555555-5555-4555-8555-555555555555' as NodeId,
+                    position: { x: 10, y: 16 },
+                  },
+                ],
+                segments: [
+                  {
+                    id: '66666666-6666-4666-8666-666666666666' as NodeId,
+                    startVertexId: third,
+                    endVertexId: fourth,
+                    startControl: { x: 6, y: 0 },
+                    endControl: { x: -6, y: 0 },
+                  },
+                  {
+                    id: '77777777-7777-4777-8777-777777777777' as NodeId,
+                    startVertexId: fourth,
+                    endVertexId: '55555555-5555-4555-8555-555555555555' as NodeId,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                  {
+                    id: '88888888-8888-4888-8888-888888888888' as NodeId,
+                    startVertexId: '55555555-5555-4555-8555-555555555555' as NodeId,
+                    endVertexId: third,
+                    startControl: { x: 0, y: 0 },
+                    endControl: { x: 0, y: 0 },
+                  },
+                ],
+              },
+              fillRule: 'nonzero',
+              fill: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 0.3 },
+              stroke: {
+                paint: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
+                width: 2,
+              },
+            }
+          : node,
+      ),
+    },
+  };
+  const shell = new EditorShell(1440, 900, { documentSnapshot: () => snapshot });
+  const recording = recordingRenderer();
+
+  shell.render(recording.renderer);
+
+  expect(recording.calls).toContainEqual({ method: 'translate', args: [10, 12] });
+  expect(recording.calls).toContainEqual({ method: 'scale', args: [2, 1.5] });
+  expect(recording.calls.filter((call) => call.method === 'moveTo')).toHaveLength(2);
+  expect(recording.calls.filter((call) => call.method === 'bezierCurveTo')).toHaveLength(2);
+  expect(recording.calls.filter((call) => call.method === 'lineTo')).toHaveLength(4);
+  expect(recording.calls.filter((call) => call.method === 'closePath')).toHaveLength(2);
+  expect(recording.calls).toContainEqual({ method: 'fill', args: ['rgba(46, 115, 242, 0.3)'] });
+  expect(recording.calls).toContainEqual({
+    method: 'stroke',
+    args: ['rgba(46, 115, 242, 1)', 2],
+  });
+  expect(recording.calls).toContainEqual({ method: 'stroke', args: ['#2563eb', 2] });
+});
+
 test('composes scaled descendants and keeps selected movement in page space', () => {
   const snapshot = editorSnapshot([first]);
   const scaled: EditorSnapshot = {

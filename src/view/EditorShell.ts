@@ -65,6 +65,7 @@ import {
   type CreationPointerSample,
   type CreationShapeTool,
 } from './CreationGestureSession';
+import { appendPathNetwork } from './pathGeometry';
 
 export type DrawerSide = 'left' | 'right';
 
@@ -690,9 +691,11 @@ class LayerRow extends Entity {
           ? '◇'
           : item.type === 'ellipse'
             ? '○'
-            : item.type === 'text'
-              ? 'T'
-              : '◆';
+            : item.type === 'path'
+              ? '⌁'
+              : item.type === 'text'
+                ? 'T'
+                : '◆';
     renderer.fillText(glyph, 6, 17, '600 11px system-ui, sans-serif', '#aebed6');
     renderer.fillText(item.name, 24, 17, '500 12px system-ui, sans-serif', '#f3f6fb');
     if (item.locked)
@@ -1575,6 +1578,35 @@ export class EditorShell extends Entity {
           renderer.setGlobalAlpha(1);
           renderer.beginPath();
           appendEllipsePath(renderer, -2, -2, node.width + 4, node.height + 4);
+          renderer.stroke('#2563eb', 2);
+        }
+      } else if (node.type === 'path') {
+        renderer.setGlobalAlpha(opacity);
+        const appended = appendPathNetwork(renderer, node.network, `/nodes/${nodeIndex}/network`);
+        if (!appended.ok) {
+          renderer.restore();
+          this.reportRenderErrorOnce(appended.error);
+          return;
+        }
+        const unsupportedEvenOddFill =
+          node.fill !== null && node.fillRule === 'evenodd' && appended.value.componentCount > 1;
+        if (unsupportedEvenOddFill) {
+          this.reportRenderErrorOnce({
+            code: 'render.fill-rule-unsupported',
+            path: `/nodes/${nodeIndex}/fillRule`,
+          });
+        } else if (node.fill !== null) {
+          renderer.fill(this.paint(node.fill));
+        }
+        if (node.stroke !== null) renderer.stroke(this.paint(node.stroke.paint), node.stroke.width);
+        if (selected.has(node.id)) {
+          renderer.setGlobalAlpha(1);
+          const outline = appendPathNetwork(renderer, node.network, `/nodes/${nodeIndex}/network`);
+          if (!outline.ok) {
+            renderer.restore();
+            this.reportRenderErrorOnce(outline.error);
+            return;
+          }
           renderer.stroke('#2563eb', 2);
         }
       } else if (node.type === 'text') {

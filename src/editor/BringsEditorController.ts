@@ -13,6 +13,8 @@ import {
   type EditorSnapshot,
   type NodeId,
   type NodePropertyPatchInput,
+  type PathNetworkInput,
+  type PathPointInput,
   type Result,
   type SceneNode,
   type ResizeBounds,
@@ -45,6 +47,19 @@ export type UuidFactory = () => string;
 
 /** One deterministic same-parent paint-order command. */
 export type ArrangeAction = 'forward' | 'backward' | 'front' | 'back';
+
+/** One Pen anchor expressed in page space before Core graph identities exist. */
+export type CompletedPathAnchor = Readonly<{
+  position: PathPointInput;
+  incomingControl: PathPointInput;
+  outgoingControl: PathPointInput;
+}>;
+
+/** One completed Pen contour ready for a single durable Core command. */
+export type CompletedPathInput = Readonly<{
+  anchors: readonly CompletedPathAnchor[];
+  closed: boolean;
+}>;
 
 /** One canvas Layers row derived directly from the active Core document page. */
 export type BringsLayerItem = Readonly<{
@@ -904,6 +919,99 @@ export class BringsEditorController {
     );
   }
 
+  /** Create one completed page-space Pen contour in the active Frame. */
+  public createPath(input: CompletedPathInput): Result<EditorSnapshot> {
+    const completed = this.captureCompletedPath(input);
+    if (!completed.ok) return completed;
+    if (this.activeFrameId === null) return this.failure('shape.frame-required', '/parentId');
+    const snapshot = this.store.snapshot();
+    const frame = snapshot.document.nodes.find((node) => node.id === this.activeFrameId);
+    if (frame?.type !== 'frame') return this.failure('shape.frame-required', '/parentId');
+    const pageMatrix = this.axisAlignedPageMatrix(snapshot.document, frame);
+    if (!pageMatrix.ok) return pageMatrix;
+    const [scaleX, , , scaleY, translateX, translateY] = pageMatrix.value;
+    const localAnchors: CompletedPathAnchor[] = [];
+    for (const anchor of completed.value.anchors) {
+      const local = {
+        position: {
+          x: (anchor.position.x - translateX) / scaleX,
+          y: (anchor.position.y - translateY) / scaleY,
+        },
+        incomingControl: {
+          x: anchor.incomingControl.x / scaleX,
+          y: anchor.incomingControl.y / scaleY,
+        },
+        outgoingControl: {
+          x: anchor.outgoingControl.x / scaleX,
+          y: anchor.outgoingControl.y / scaleY,
+        },
+      };
+      if (
+        ![
+          local.position.x,
+          local.position.y,
+          local.incomingControl.x,
+          local.incomingControl.y,
+          local.outgoingControl.x,
+          local.outgoingControl.y,
+        ].every(Number.isFinite)
+      ) {
+        return this.failure('interaction.coordinate-invalid', '/anchors');
+      }
+      localAnchors.push(
+        Object.freeze({
+          position: this.freezePathPoint(local.position),
+          incomingControl: this.freezePathPoint(local.incomingControl),
+          outgoingControl: this.freezePathPoint(local.outgoingControl),
+        }),
+      );
+    }
+
+    const id = this.createUuid();
+    const vertices = localAnchors.map((anchor) => ({
+      id: this.createUuid(),
+      position: anchor.position,
+    }));
+    const segmentCount = completed.value.closed ? vertices.length : vertices.length - 1;
+    const segments: PathNetworkInput['segments'][number][] = [];
+    for (let index = 0; index < segmentCount; index += 1) {
+      const endIndex = (index + 1) % vertices.length;
+      segments.push({
+        id: this.createUuid(),
+        startVertexId: vertices[index]!.id,
+        endVertexId: vertices[endIndex]!.id,
+        startControl: localAnchors[index]!.outgoingControl,
+        endControl: localAnchors[endIndex]!.incomingControl,
+      });
+    }
+    const result = this.store.execute({
+      kind: 'create-path',
+      pageId: snapshot.document.activePageId,
+      parentId: frame.id,
+      index: frame.childIds.length,
+      path: {
+        id,
+        name: 'Path',
+        visible: true,
+        locked: false,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 0, 0],
+        network: { vertices, segments },
+        fillRule: 'nonzero',
+        fill: completed.value.closed ? { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 0.3 } : null,
+        stroke: {
+          paint: { type: 'solid', r: 0.18, g: 0.45, b: 0.95, a: 1 },
+          width: 2,
+        },
+      },
+    });
+    if (!result.ok) return this.finishOperation(snapshot.selection, result);
+    return this.finishOperation(
+      snapshot.selection,
+      this.store.setSelection({ nodeIds: [id], activeNodeId: id }),
+    );
+  }
+
   /** Select the frontmost eligible Core node at a page-space point. */
   public selectAt(x: number, y: number): Result<EditorSnapshot> {
     const viewport = viewportPoint(x, y);
@@ -1023,6 +1131,128 @@ export class BringsEditorController {
     return {
       ok: true,
       value: Object.freeze({ x, y, width, height }) as EditorPageRect,
+    };
+  }
+
+  private captureCompletedPath(input: CompletedPathInput): Result<CompletedPathInput> {
+    let anchors: readonly CompletedPathAnchor[];
+    let closed: boolean;
+    try {
+      anchors = input.anchors;
+      closed = input.closed;
+    } catch {
+      return this.failure('path.component-invalid', '/anchors');
+    }
+    if (!Array.isArray(anchors) || typeof closed !== 'boolean') {
+      return this.failure('path.component-invalid', '/anchors');
+    }
+    if (anchors.length > 10_000) return this.failure('path.vertices-limit', '/anchors');
+    if (anchors.length < (closed ? 3 : 2)) {
+      return this.failure('path.component-invalid', '/anchors');
+    }
+    const detached: CompletedPathAnchor[] = [];
+    for (let index = 0; index < anchors.length; index += 1) {
+      let anchor: CompletedPathAnchor;
+      try {
+        anchor = anchors[index]!;
+      } catch {
+        return this.failure('path.component-invalid', `/anchors/${index}`);
+      }
+      const position = this.capturePathPoint(anchor, 'position', `/anchors/${index}/position`);
+      if (!position.ok) return position;
+      const incomingControl = this.capturePathPoint(
+        anchor,
+        'incomingControl',
+        `/anchors/${index}/incomingControl`,
+      );
+      if (!incomingControl.ok) return incomingControl;
+      const outgoingControl = this.capturePathPoint(
+        anchor,
+        'outgoingControl',
+        `/anchors/${index}/outgoingControl`,
+      );
+      if (!outgoingControl.ok) return outgoingControl;
+      detached.push(
+        Object.freeze({
+          position: position.value,
+          incomingControl: incomingControl.value,
+          outgoingControl: outgoingControl.value,
+        }),
+      );
+    }
+    return {
+      ok: true,
+      value: Object.freeze({ anchors: Object.freeze(detached), closed }),
+    };
+  }
+
+  private capturePathPoint(
+    anchor: CompletedPathAnchor,
+    key: 'position' | 'incomingControl' | 'outgoingControl',
+    path: string,
+  ): Result<PathPointInput> {
+    let point: PathPointInput;
+    let x: number;
+    let y: number;
+    try {
+      point = anchor[key];
+      x = point.x;
+      y = point.y;
+    } catch {
+      return this.failure('interaction.coordinate-invalid', path);
+    }
+    return Number.isFinite(x) && Number.isFinite(y)
+      ? { ok: true, value: this.freezePathPoint({ x, y }) }
+      : this.failure('interaction.coordinate-invalid', path);
+  }
+
+  private freezePathPoint(point: PathPointInput): PathPointInput {
+    return Object.freeze({
+      x: Object.is(point.x, -0) ? 0 : point.x,
+      y: Object.is(point.y, -0) ? 0 : point.y,
+    });
+  }
+
+  private axisAlignedPageMatrix(
+    document: BringsDocument,
+    node: SceneNode,
+  ): Result<readonly [number, 0, 0, number, number, number]> {
+    const nodes = new Map(document.nodes.map((candidate) => [candidate.id, candidate]));
+    const chain: SceneNode[] = [];
+    const visited = new Set<NodeId>();
+    let current: SceneNode | undefined = node;
+    while (current !== undefined) {
+      if (visited.has(current.id)) return this.failure('node.cycle', '/parentId');
+      visited.add(current.id);
+      chain.push(current);
+      current = current.parentId === null ? undefined : nodes.get(current.parentId);
+    }
+    let scaleX = 1;
+    let scaleY = 1;
+    let translateX = 0;
+    let translateY = 0;
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const [localScaleX, shearY, shearX, localScaleY, localX, localY] = chain[index]!.transform;
+      if (
+        shearX !== 0 ||
+        shearY !== 0 ||
+        localScaleX === 0 ||
+        localScaleY === 0 ||
+        ![localScaleX, localScaleY, localX, localY].every(Number.isFinite)
+      ) {
+        return this.failure('shape.frame-transform-unsupported', '/parentId');
+      }
+      translateX += scaleX * localX;
+      translateY += scaleY * localY;
+      scaleX *= localScaleX;
+      scaleY *= localScaleY;
+      if (![scaleX, scaleY, translateX, translateY].every(Number.isFinite)) {
+        return this.failure('shape.frame-transform-unsupported', '/parentId');
+      }
+    }
+    return {
+      ok: true,
+      value: Object.freeze([scaleX, 0, 0, scaleY, translateX, translateY]),
     };
   }
 
