@@ -35,7 +35,7 @@
   "dependencies": {
     "@vectojs/brings-core": "0.15.0",
     "@vectojs/core": "1.11.1",
-    "@vectojs/ui": "1.11.3"
+    "@vectojs/ui": "2.13.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
